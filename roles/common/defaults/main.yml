@@ -1,0 +1,40 @@
+---
+# Applique le fuseau horaire ci-dessous.
+#
+# À laisser à false sur des serveurs en production : changer le fuseau d'une
+# machine en service décale l'horodatage de tous ses journaux, déplace l'heure
+# absolue d'exécution de ses tâches planifiées, et fausse la corrélation
+# d'incidents avec les autres machines. Ce n'est pas une décision qui relève
+# d'un déploiement de supervision.
+common_manage_timezone: true
+common_timezone: UTC
+
+# Alimente /etc/hosts avec tous les hôtes de l'inventaire, afin que la
+# supervision continue de fonctionner si le DNS tombe.
+common_manage_hosts_file: true
+
+# Installe chrony et remplace la configuration de synchronisation de l'heure.
+#
+# Un décalage d'horloge fausse les graphiques et les fenêtres de notification,
+# d'où l'intérêt en laboratoire. Mais à laisser à false en production : cette
+# tâche désinstalle systemd-timesyncd, écrase entièrement chrony.conf, et
+# remplace donc une éventuelle source de temps interne par un pool public. Un
+# saut d'horloge provoqué par makestep casse par ailleurs Kerberos, la
+# validation des certificats et certaines bases de données.
+common_ntp_enabled: true
+common_ntp_servers:
+  - 0.pool.ntp.org
+  - 1.pool.ntp.org
+
+# Paquets installés partout, par famille de distribution.
+common_base_packages_debian:
+  - curl
+  - ca-certificates
+  - python3-apt
+common_base_packages_redhat:
+  - curl
+  - ca-certificates
+
+# Nom du service de synchronisation d'horloge, par famille.
+common_ntp_service_debian: chrony
+common_ntp_service_redhat: chronyd

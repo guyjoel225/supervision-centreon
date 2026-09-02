@@ -1,0 +1,13 @@
+---
+# Résolution des différences entre familles de distributions.
+# Ces valeurs ne sont pas destinées à être surchargées par l'utilisateur ;
+# les points d'entrée configurables sont dans defaults/main.yml.
+_common_base_packages: >-
+  {{ common_base_packages_debian
+     if ansible_facts['os_family'] == 'Debian'
+     else common_base_packages_redhat }}
+
+_common_ntp_service: >-
+  {{ common_ntp_service_debian
+     if ansible_facts['os_family'] == 'Debian'
+     else common_ntp_service_redhat }}

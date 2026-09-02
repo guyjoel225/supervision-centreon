@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: common
+  author: Joel Konan
+  description: >-
+    Prérequis système communs à toutes les machines du parc de supervision :
+    horloge, résolution de noms, paquets de base.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+    - name: EL
+      versions: ["8", "9", "10"]
+dependencies: []

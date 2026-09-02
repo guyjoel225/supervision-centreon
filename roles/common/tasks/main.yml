@@ -1,0 +1,71 @@
+---
+- name: Refuser une distribution non prise en charge par ce rôle
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat']
+    fail_msg: >-
+      Le rôle common ne gère que les familles Debian et RedHat.
+      Famille détectée sur {{ inventory_hostname }} : {{ ansible_facts['os_family'] }}.
+    quiet: true
+
+- name: Installer les paquets de base
+  ansible.builtin.package:
+    name: "{{ _common_base_packages }}"
+    state: present
+  register: _common_packages
+  retries: 3
+  delay: 5
+  until: _common_packages is succeeded
+
+- name: Positionner le fuseau horaire
+  when: common_manage_timezone | bool
+  community.general.timezone:
+    name: "{{ common_timezone }}"
+  notify: Redémarrer le service de synchronisation d'horloge
+
+- name: Configurer la synchronisation de l'heure
+  when: common_ntp_enabled | bool
+  block:
+    - name: Installer chrony
+      ansible.builtin.package:
+        name: chrony
+        state: present
+
+    - name: Déposer la configuration de chrony
+      ansible.builtin.template:
+        src: chrony.conf.j2
+        dest: "{{ '/etc/chrony/chrony.conf' if ansible_facts['os_family'] == 'Debian' else '/etc/chrony.conf' }}"
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      notify: Redémarrer le service de synchronisation d'horloge
+
+    # En simulation, le paquet chrony n'est pas réellement installé, donc son
+    # service ne peut pas exister. Ce seul cas est toléré, et uniquement en
+    # mode simulation, pour que --check aille au bout sur une machine vierge.
+    # En exécution réelle, l'absence du service reste une erreur.
+    - name: Activer et démarrer chrony
+      ansible.builtin.service:
+        name: "{{ _common_ntp_service }}"
+        state: started
+        enabled: true
+      register: _common_ntp_started
+      failed_when:
+        - _common_ntp_started is failed
+        - not (ansible_check_mode
+               and 'Could not find the requested service'
+                   in (_common_ntp_started.msg | default('')))
+
+- name: Déclarer les hôtes de l'inventaire dans /etc/hosts
+  when: common_manage_hosts_file | bool
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} SUPERVISION CENTREON - géré par Ansible"
+    block: |
+      {% for h in groups['all'] | sort %}
+      {{ hostvars[h].ansible_host | default(h) }} {{ ([h, hostvars[h].centreon_central_fqdn | default('', true)] | select | join(' ')) }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"

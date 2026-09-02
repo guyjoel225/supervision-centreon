@@ -1,0 +1,10 @@
+---
+# Les handlers de redémarrage ne sont pas joués en simulation : --check ne
+# redémarre rien, et le service peut ne pas exister encore parce que son
+# paquet n'a pas été réellement posé. Les faire échouer là n'apprendrait
+# rien et empêcherait la simulation d'aller au bout.
+- name: Redémarrer le service de synchronisation d'horloge
+  ansible.builtin.service:
+    name: "{{ _common_ntp_service }}"
+    state: restarted
+  when: not ansible_check_mode

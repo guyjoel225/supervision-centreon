@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# Synchronisation d'horloge du parc de supervision.
+# Un écart d'horloge fausse les graphiques Centreon et les fenêtres de
+# notification : ce fichier est donc géré et ne doit pas être édité à la main.
+
+{% for server in common_ntp_servers %}
+pool {{ server }} iburst
+{% endfor %}
+
+driftfile {{ '/var/lib/chrony/chrony.drift' if ansible_facts['os_family'] == 'Debian' else '/var/lib/chrony/drift' }}
+makestep 1.0 3
+rtcsync
+logdir /var/log/chrony
