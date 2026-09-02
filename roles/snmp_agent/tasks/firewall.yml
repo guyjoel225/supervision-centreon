@@ -1,0 +1,130 @@
+---
+# Détection du pare-feu actif.
+#
+# service_facts était utilisé auparavant : il énumère toutes les unités
+# systemd et coûtait de huit à quarante secondes par machine. Il était en
+# outre inexact pour ufw, dont l'unité reste « active (exited) » même quand
+# le pare-feu est désactivé. Les deux commandes ci-dessous coûtent moins
+# d'une seconde et interrogent le bon critère : l'état du service pour
+# firewalld, l'état du pare-feu lui-même pour ufw.
+
+# Interrogé sans paramètre d'état, le module ne fait que lire l'unité.
+# Il échoue si elle n'existe pas, d'où le failed_when neutralisé.
+- name: Relever l'état de firewalld
+  ansible.builtin.systemd_service:
+    name: firewalld
+  register: _snmp_agent_firewalld
+  changed_when: false
+  failed_when: false
+
+- name: Relever l'état de ufw
+  when: ansible_facts['os_family'] == 'Debian'
+  ansible.builtin.command:
+    cmd: ufw status
+  register: _snmp_agent_ufw
+  changed_when: false
+  failed_when: false
+
+- name: Retenir quel pare-feu gouverne cette machine
+  ansible.builtin.set_fact:
+    _snmp_agent_firewalld_active: >-
+      {{ (_snmp_agent_firewalld.status | default({})).get('ActiveState', '') == 'active' }}
+    _snmp_agent_ufw_active: >-
+      {{ 'Status: active' in (_snmp_agent_ufw.stdout | default('')) }}
+
+# ---------------------------------------------------------------------
+# firewalld
+# ---------------------------------------------------------------------
+- name: Gérer les autorisations SNMP dans firewalld
+  when: _snmp_agent_firewalld_active | bool
+  block:
+
+    - name: Autoriser les gestionnaires déclarés
+      ansible.posix.firewalld:
+        rich_rule: >-
+          rule family="ipv4"
+          source address="{{ item }}"
+          port port="{{ snmp_agent_port }}" protocol="udp"
+          accept
+        permanent: true
+        immediate: true
+        state: enabled
+      loop: "{{ snmp_agent_allowed_managers }}"
+
+    # Le module firewalld ajoute une règle mais ne retire jamais celles qui
+    # ne sont plus voulues. Sans cette purge, une adresse retirée de
+    # l'inventaire continuerait indéfiniment d'interroger les agents.
+    - name: Purger les autorisations SNMP obsolètes
+      when: snmp_agent_prune_firewall_rules | bool
+      block:
+
+        - name: Relever les règles SNMP en place
+          ansible.builtin.command:
+            cmd: firewall-cmd --permanent --list-rich-rules
+          register: _snmp_agent_rich_rules
+          changed_when: false
+
+        - name: Retirer les autorisations qui ne sont plus déclarées
+          vars:
+            _obsolete: >-
+              {{ _snmp_agent_rich_rules.stdout_lines
+                 | select('search', 'port port="' ~ snmp_agent_port ~ '"')
+                 | map('regex_search', 'source address="([0-9.]+)"', '\1')
+                 | flatten | unique
+                 | difference(snmp_agent_allowed_managers) }}
+          ansible.posix.firewalld:
+            rich_rule: >-
+              rule family="ipv4"
+              source address="{{ item }}"
+              port port="{{ snmp_agent_port }}" protocol="udp"
+              accept
+            permanent: true
+            immediate: true
+            state: disabled
+          loop: "{{ _obsolete }}"
+          loop_control:
+            label: "{{ item }} n'est plus autorisé"
+
+# ---------------------------------------------------------------------
+# ufw
+# ---------------------------------------------------------------------
+- name: Gérer les autorisations SNMP dans ufw
+  when: _snmp_agent_ufw_active | bool
+  block:
+
+    - name: Autoriser les gestionnaires déclarés
+      community.general.ufw:
+        rule: allow
+        src: "{{ item }}"
+        port: "{{ snmp_agent_port }}"
+        proto: udp
+        comment: "Supervision Centreon"
+      loop: "{{ snmp_agent_allowed_managers }}"
+
+    - name: Purger les autorisations SNMP obsolètes
+      when: snmp_agent_prune_firewall_rules | bool
+      block:
+
+        - name: Relever les règles SNMP en place
+          ansible.builtin.command:
+            cmd: ufw status numbered
+          register: _snmp_agent_ufw_rules
+          changed_when: false
+
+        - name: Retirer les autorisations qui ne sont plus déclarées
+          vars:
+            _obsolete: >-
+              {{ _snmp_agent_ufw_rules.stdout_lines
+                 | select('search', '\s' ~ snmp_agent_port ~ '/udp\s')
+                 | map('regex_search', '([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s*$')
+                 | select('string') | unique
+                 | difference(snmp_agent_allowed_managers) }}
+          community.general.ufw:
+            rule: allow
+            src: "{{ item }}"
+            port: "{{ snmp_agent_port }}"
+            proto: udp
+            delete: true
+          loop: "{{ _obsolete }}"
+          loop_control:
+            label: "{{ item }} n'est plus autorisé"

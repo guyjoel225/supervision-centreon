@@ -1,0 +1,11 @@
+---
+# Les handlers de redémarrage ne sont pas joués en simulation : --check ne
+# redémarre rien, et le service peut ne pas exister encore parce que son
+# paquet n'a pas été réellement posé. Les faire échouer là n'apprendrait
+# rien et empêcherait la simulation d'aller au bout.
+- name: Redémarrer snmpd
+  ansible.builtin.service:
+    name: "{{ _snmp_agent_service }}"
+    state: restarted
+    enabled: true
+  when: not ansible_check_mode

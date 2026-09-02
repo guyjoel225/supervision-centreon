@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: snmp_agent
+  author: Joel Konan
+  description: >-
+    Installe et configure un agent SNMP v3 (net-snmp) en lecture seule,
+    interrogeable uniquement par le serveur central Centreon.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+    - name: EL
+      versions: ["8", "9", "10"]
+dependencies: []

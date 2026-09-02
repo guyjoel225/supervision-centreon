@@ -1,0 +1,69 @@
+# {{ ansible_managed }}
+#
+# Agent SNMP v3 en lecture seule pour la supervision Centreon.
+# Ce fichier est généré : toute modification manuelle sera écrasée.
+#
+# Choix de conception :
+#   - aucune communauté v1/v2c n'est déclarée, ces versions transportent
+#     le secret en clair sur le réseau
+#   - l'agent n'écoute que sur les adresses listées ci-dessous
+#   - l'utilisateur ne voit qu'une vue restreinte, pas l'arbre entier
+
+###############################################################################
+# Écoute réseau
+###############################################################################
+{% set listen = [] %}
+{% if snmp_agent_listen_loopback | bool %}{% set _ = listen.append('udp:127.0.0.1:' ~ snmp_agent_port) %}{% endif %}
+{% set _ = listen.append('udp:' ~ snmp_agent_listen_address ~ ':' ~ snmp_agent_port) %}
+agentaddress {{ listen | unique | join(',') }}
+
+###############################################################################
+# Vue de lecture : uniquement ce que consomment les plugins Linux de Centreon
+###############################################################################
+{% for entry in snmp_agent_view_oids %}
+# {{ entry.comment }}
+view {{ snmp_agent_view_name }} included {{ entry.oid }}
+{% endfor %}
+
+###############################################################################
+# Droits d'accès
+###############################################################################
+{% if snmp_agent_enable_v3 | bool %}
+# SNMP v3, lecture seule, niveau de sécurité « {{ snmp_agent_v3_security_level }} »
+# (authentification et chiffrement), restreinte à la vue ci-dessus.
+rouser {{ snmp_agent_v3_user }} {{ snmp_agent_v3_security_level }} -V {{ snmp_agent_view_name }}
+{% endif %}
+{% if snmp_agent_enable_v2c | bool %}
+
+# SNMP v2c, lecture seule, restreinte à la vue ci-dessus.
+#
+# ATTENTION : la communauté circule en clair sur le réseau. Elle n'est
+# ni authentifiée ni chiffrée, et quiconque écoute le lien la capture.
+# La seule protection réelle est la restriction par adresse source
+# ci-dessous, doublée du filtrage du pare-feu.
+{% for manager in snmp_agent_v2c_allowed_managers %}
+rocommunity {{ snmp_agent_v2c_community }} {{ manager }} -V {{ snmp_agent_view_name }}
+{% endfor %}
+{% endif %}
+
+###############################################################################
+# Identification de la machine
+###############################################################################
+sysLocation {{ snmp_agent_sys_location }}
+sysContact  {{ snmp_agent_sys_contact }}
+sysServices 72
+sysName     {{ inventory_hostname }}
+
+###############################################################################
+# Compteurs exposés à la demande des plugins
+###############################################################################
+# Charge système : seuils volontairement hauts, l'évaluation est faite par
+# Centreon et non par l'agent.
+load 100 100 100
+
+# Surveillance des systèmes de fichiers via UCD-SNMP, en complément de
+# HOST-RESOURCES-MIB.
+includeAllDisks 10%
+
+# Statistiques d'entrées-sorties et de processeur.
+extend .1.3.6.1.4.1.2021.7890.1 distro /usr/bin/env sh -c "echo {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"

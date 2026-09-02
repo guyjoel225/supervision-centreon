@@ -1,0 +1,61 @@
+---
+# Écraser /etc/snmp/snmpd.conf est le risque le plus sérieux de ce rôle en
+# production : si la machine est déjà supervisée par un autre outil, ses
+# communautés, ses vues et ses destinataires de traps disparaissent, et
+# l'ancienne supervision passe en aveugle sans le moindre avertissement.
+#
+# Trois cas sont distingués, dans cet ordre :
+#   - le fichier porte notre marqueur : il est à nous, on peut le remplacer
+#   - le fichier est celui livré par le paquet, non modifié : rien à préserver
+#   - le fichier a été modifié par quelqu'un : on s'arrête et on le dit
+#
+# Le troisième cas est reconnu en interrogeant le gestionnaire de paquets, qui
+# sait si un fichier de configuration a divergé de la version livrée. C'est
+# plus fiable que de chercher des directives au jugé.
+
+- name: Relever la configuration SNMP en place
+  ansible.builtin.stat:
+    path: /etc/snmp/snmpd.conf
+  register: _snmp_agent_conf_stat
+
+- name: Analyser la configuration existante
+  when: _snmp_agent_conf_stat.stat.exists
+  block:
+
+    - name: Vérifier si cette configuration est déjà gérée par ce rôle
+      ansible.builtin.command:
+        cmd: grep -qF "Agent SNMP v3 en lecture seule pour la supervision Centreon" /etc/snmp/snmpd.conf
+      register: _snmp_agent_conf_is_ours
+      changed_when: false
+      failed_when: false
+
+    # dpkg et rpm listent les fichiers qui ont divergé de la version livrée
+    # par le paquet. Le filtrage se fait côté Ansible plutôt que par un pipe,
+    # pour rester sur une commande simple et lisible dans les journaux.
+    - name: Demander au gestionnaire de paquets si le fichier a été modifié
+      when: _snmp_agent_conf_is_ours.rc != 0
+      ansible.builtin.command:
+        cmd: >-
+          {{ 'dpkg --verify snmpd'
+             if ansible_facts['os_family'] == 'Debian'
+             else 'rpm --verify net-snmp' }}
+      register: _snmp_agent_conf_verify
+      changed_when: false
+      failed_when: false
+
+- name: Refuser d'écraser une configuration SNMP appartenant à un tiers
+  when:
+    - _snmp_agent_conf_stat.stat.exists
+    - _snmp_agent_conf_is_ours.rc | default(0) != 0
+    - "'/etc/snmp/snmpd.conf' in (_snmp_agent_conf_verify.stdout | default(''))"
+    - not snmp_agent_replace_foreign_config | bool
+  ansible.builtin.fail:
+    msg: >-
+      /etc/snmp/snmpd.conf a été modifié sur {{ inventory_hostname }} et n'a pas
+      été écrit par ce rôle. Cette machine est probablement déjà supervisée par
+      un autre outil : l'écraser ferait tomber cette supervision en aveugle,
+      sans alerte. Le déploiement s'arrête ici volontairement.
+      Deux issues : reporter la configuration existante dans les variables du
+      rôle, ou, après avoir vérifié qu'elle ne sert plus, relancer avec
+      -e snmp_agent_replace_foreign_config=true. Une sauvegarde horodatée sera
+      dans tous les cas conservée à côté du fichier.

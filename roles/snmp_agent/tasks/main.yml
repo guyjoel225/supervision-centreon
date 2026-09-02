@@ -1,0 +1,126 @@
+---
+- name: Vérifier qu'au moins une version du protocole est activée
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat']
+      - snmp_agent_enable_v3 | bool or snmp_agent_enable_v2c | bool
+      - snmp_agent_allowed_managers | length > 0
+    fail_msg: >-
+      Configuration SNMP inexploitable sur {{ inventory_hostname }}.
+      Au moins une version du protocole doit être activée, et au moins un
+      gestionnaire doit être autorisé à interroger l'agent. Un agent sans
+      version active écoute sans jamais répondre à personne.
+    quiet: true
+
+- name: Vérifier les paramètres de la version 3
+  when: snmp_agent_enable_v3 | bool
+  ansible.builtin.assert:
+    that:
+      - snmp_agent_v3_user | length > 0
+      - snmp_agent_v3_auth_passphrase | length >= 8
+      - snmp_agent_v3_priv_passphrase | length >= 8
+    fail_msg: >-
+      Paramètres SNMP v3 incomplets sur {{ inventory_hostname }}. Les
+      passphrases d'authentification et de chiffrement doivent faire au moins
+      8 caractères, exigence du protocole lui-même.
+    quiet: true
+
+- name: Vérifier les paramètres de la version 2c
+  when: snmp_agent_enable_v2c | bool
+  ansible.builtin.assert:
+    that:
+      - snmp_agent_v2c_community | length > 0
+      - snmp_agent_v2c_allowed_managers | length > 0
+    fail_msg: >-
+      Configuration SNMP v2c inexploitable sur {{ inventory_hostname }}.
+      Une communauté doit être fournie, et au moins une adresse doit être
+      autorisée à l'employer : la communauté circulant en clair, la
+      restriction par adresse source est la seule protection réelle.
+    quiet: true
+
+# Une communauté faible est refusée par défaut, mais acceptée sur demande
+# explicite : quand le serveur central est déjà en service, sa communauté
+# est imposée et ne se change pas unilatéralement.
+- name: Refuser une communauté v2c trop faible
+  when:
+    - snmp_agent_enable_v2c | bool
+    - not snmp_agent_v2c_accept_weak_community | bool
+  ansible.builtin.assert:
+    that:
+      - snmp_agent_v2c_community | length >= 8
+      - snmp_agent_v2c_community | lower not in ['public', 'private', 'community']
+    fail_msg: >-
+      La communauté SNMP v2c prévue pour {{ inventory_hostname }} est trop
+      faible : moins de huit caractères, ou l'une des valeurs « public »,
+      « private », « community » que teste en premier quiconque balaie un
+      réseau.
+      Si cette communauté est celle d'un serveur central déjà en service et
+      qu'elle ne peut pas être changée, relancer avec
+      -e snmp_agent_v2c_accept_weak_community=true. Elle sera alors acceptée
+      telle quelle, et l'avertissement rappelé à chaque exécution.
+    quiet: true
+
+- name: Signaler qu'une communauté faible a été acceptée
+  when:
+    - snmp_agent_enable_v2c | bool
+    - snmp_agent_v2c_accept_weak_community | bool
+  ansible.builtin.debug:
+    msg: >-
+      Une communauté SNMP v2c faible est acceptée sur {{ inventory_hostname }}
+      à la demande. Elle circule en clair et se devine : la supervision de
+      cette machine ne tient qu'à la restriction par adresse source et au
+      pare-feu. À faire évoluer dès que le serveur central le permettra.
+
+- name: Signaler que la communauté v2c circulera en clair
+  when: snmp_agent_enable_v2c | bool
+  ansible.builtin.debug:
+    msg: >-
+      SNMP v2c est activé sur {{ inventory_hostname }}. La communauté circule
+      en clair sur le réseau, sans authentification ni chiffrement : seules la
+      restriction aux adresses {{ snmp_agent_v2c_allowed_managers | join(', ') }}
+      et le filtrage du pare-feu la protègent. À refermer dès que le serveur
+      central saura interroger en v3.
+
+- name: Installer les paquets net-snmp
+  ansible.builtin.package:
+    name: "{{ _snmp_agent_packages }}"
+    state: present
+  register: _snmp_agent_install
+  retries: 3
+  delay: 5
+  until: _snmp_agent_install is succeeded
+
+- name: Protéger une configuration SNMP préexistante
+  ansible.builtin.include_tasks: preserve_existing.yml
+
+- name: Déposer la configuration de l'agent
+  ansible.builtin.template:
+    src: snmpd.conf.j2
+    dest: /etc/snmp/snmpd.conf
+    owner: root
+    group: root
+    mode: "0600"
+    backup: true
+  notify: Redémarrer snmpd
+
+- name: Créer l'utilisateur SNMP v3
+  when: snmp_agent_enable_v3 | bool
+  ansible.builtin.include_tasks: v3_user.yml
+
+- name: Ouvrir le port SNMP dans le pare-feu
+  when: snmp_agent_manage_firewall | bool
+  ansible.builtin.include_tasks: firewall.yml
+
+# Même raison que pour chrony : en simulation le paquet n'est pas posé, donc
+# le service n'existe pas encore. Toléré en mode simulation seulement.
+- name: Activer et démarrer snmpd
+  ansible.builtin.service:
+    name: "{{ _snmp_agent_service }}"
+    state: started
+    enabled: true
+  register: _snmp_agent_started
+  failed_when:
+    - _snmp_agent_started is failed
+    - not (ansible_check_mode
+           and 'Could not find the requested service'
+               in (_snmp_agent_started.msg | default('')))

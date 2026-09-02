@@ -1,0 +1,18 @@
+---
+# Différences entre familles de distributions, non destinées à être surchargées.
+_snmp_agent_packages: >-
+  {{ ['snmpd', 'snmp']
+     if ansible_facts['os_family'] == 'Debian'
+     else ['net-snmp', 'net-snmp-utils'] }}
+
+# Fichier de configuration persistant où net-snmp stocke les utilisateurs v3.
+_snmp_agent_persistent_conf: >-
+  {{ '/var/lib/snmp/snmpd.conf'
+     if ansible_facts['os_family'] == 'Debian'
+     else '/var/lib/net-snmp/snmpd.conf' }}
+
+# Compte système sous lequel tourne l'agent.
+_snmp_agent_run_user: >-
+  {{ 'Debian-snmp' if ansible_facts['os_family'] == 'Debian' else 'root' }}
+
+_snmp_agent_service: snmpd

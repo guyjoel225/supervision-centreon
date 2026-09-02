@@ -1,0 +1,137 @@
+---
+# Création de l'utilisateur SNMP v3.
+#
+# La méthode net-snmp consiste à écrire une directive createUser dans le
+# fichier persistant pendant que l'agent est arrêté. L'agent la lit au
+# démarrage, dérive les clés localisées et remplace la ligne par un usmUser.
+#
+# Piège : cette réécriture n'est pas immédiate. net-snmp ne réécrit son
+# fichier persistant qu'à l'arrêt du démon. Chercher usmUser juste après un
+# démarrage échoue donc même quand l'utilisateur fonctionne parfaitement.
+# C'est un piège classique : la création réussit, et seule sa vérification
+# échoue, ce qui donne à croire que l'utilisateur n'existe pas.
+#
+# L'existence est donc établie par ce qui compte réellement : une requête
+# SNMP v3 authentifiée et chiffrée sur la boucle locale. Si elle répond,
+# l'utilisateur existe et fonctionne, quel que soit l'état du fichier.
+
+# En simulation, aucun paquet n'est posé, tempfile ne crée rien et l'agent
+# ne tourne pas : la séquence n'est pas simulable sans mentir sur son résultat.
+- name: Annoncer ce que fera la création de l'utilisateur SNMP v3
+  when: ansible_check_mode
+  ansible.builtin.debug:
+    msg: >-
+      L'utilisateur SNMP v3 « {{ snmp_agent_v3_user }} » sera éprouvé puis créé
+      si nécessaire sur {{ inventory_hostname }} lors de l'exécution réelle.
+      Cette étape n'est pas simulable : elle interroge un agent que la
+      simulation n'a pas installé.
+
+- name: Éprouver puis créer l'utilisateur SNMP v3
+  when: not ansible_check_mode
+  block:
+
+    - name: Préparer un répertoire de test SNMP
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: snmpprobe
+      register: _snmp_agent_probe_dir
+      changed_when: false
+
+    # Les passphrases ne passent jamais par une ligne de commande, où ps les
+    # rendrait lisibles par tout utilisateur de la machine.
+    - name: Déposer les paramètres de test SNMP v3
+      ansible.builtin.copy:
+        dest: "{{ _snmp_agent_probe_dir.path }}/snmp.conf"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          defVersion 3
+          defSecurityLevel authPriv
+          defSecurityName {{ snmp_agent_v3_user }}
+          defAuthType {{ snmp_agent_v3_auth_protocol }}
+          defAuthPassphrase {{ snmp_agent_v3_auth_passphrase }}
+          defPrivType {{ snmp_agent_v3_priv_protocol }}
+          defPrivPassphrase {{ snmp_agent_v3_priv_passphrase }}
+      no_log: true
+      changed_when: false
+
+    - name: Vérifier si l'utilisateur SNMP v3 répond déjà
+      ansible.builtin.command:
+        cmd: snmpget -Oqv 127.0.0.1:{{ snmp_agent_port }} .1.3.6.1.2.1.1.5.0
+      environment:
+        SNMPCONFPATH: "{{ _snmp_agent_probe_dir.path }}"
+      register: _snmp_agent_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Créer ou recréer l'utilisateur SNMP v3
+      when: _snmp_agent_probe.rc != 0 or snmp_agent_v3_force_recreate_user | bool
+      block:
+
+        - name: S'assurer que le fichier persistant de net-snmp existe
+          ansible.builtin.file:
+            path: "{{ _snmp_agent_persistent_conf }}"
+            state: touch
+            owner: "{{ _snmp_agent_run_user }}"
+            group: "{{ _snmp_agent_run_user if ansible_facts['os_family'] == 'Debian' else 'root' }}"
+            mode: "0600"
+            modification_time: preserve
+            access_time: preserve
+
+        - name: Arrêter snmpd le temps de la création de l'utilisateur
+          ansible.builtin.service:
+            name: "{{ _snmp_agent_service }}"
+            state: stopped
+
+        - name: Retirer toute définition antérieure de l'utilisateur
+          ansible.builtin.lineinfile:
+            path: "{{ _snmp_agent_persistent_conf }}"
+            regexp: '^(usmUser|createUser) .*{{ snmp_agent_v3_user }}'
+            state: absent
+
+        - name: Déclarer l'utilisateur à créer au prochain démarrage
+          ansible.builtin.lineinfile:
+            path: "{{ _snmp_agent_persistent_conf }}"
+            line: >-
+              createUser {{ snmp_agent_v3_user }}
+              {{ snmp_agent_v3_auth_protocol }} "{{ snmp_agent_v3_auth_passphrase }}"
+              {{ snmp_agent_v3_priv_protocol }} "{{ snmp_agent_v3_priv_passphrase }}"
+            insertafter: EOF
+            owner: "{{ _snmp_agent_run_user }}"
+            mode: "0600"
+          no_log: true
+
+        - name: Redémarrer snmpd pour qu'il consomme la directive createUser
+          ansible.builtin.service:
+            name: "{{ _snmp_agent_service }}"
+            state: started
+
+        # L'agent met un instant à ouvrir son socket après le démarrage :
+        # on réessaie plutôt que de supposer que c'est instantané.
+        - name: Prouver que l'utilisateur SNMP v3 fonctionne
+          ansible.builtin.command:
+            cmd: snmpget -Oqv 127.0.0.1:{{ snmp_agent_port }} .1.3.6.1.2.1.1.5.0
+          environment:
+            SNMPCONFPATH: "{{ _snmp_agent_probe_dir.path }}"
+          register: _snmp_agent_proof
+          changed_when: false
+          retries: 6
+          delay: 5
+          until: _snmp_agent_proof.rc == 0
+          failed_when: _snmp_agent_proof.rc != 0
+
+        - name: Afficher la réponse obtenue de l'agent
+          ansible.builtin.debug:
+            msg: >-
+              Utilisateur « {{ snmp_agent_v3_user }} » opérationnel sur
+              {{ inventory_hostname }} : l'agent répond « {{ _snmp_agent_proof.stdout | trim }} »
+              en SNMP v3 authentifié et chiffré.
+
+  always:
+    - name: Effacer les paramètres de test SNMP
+      when: _snmp_agent_probe_dir is defined and _snmp_agent_probe_dir.path is defined
+      ansible.builtin.file:
+        path: "{{ _snmp_agent_probe_dir.path }}"
+        state: absent
+      changed_when: false

@@ -1,0 +1,109 @@
+---
+# ===================================================================
+# Versions du protocole activées
+# ===================================================================
+# Les deux peuvent coexister dans un même agent. C'est ce qui rend une
+# migration possible : un parc interrogé en v2c continue de l'être
+# pendant qu'on bascule le central vers la v3, hôte par hôte.
+#
+# Par défaut, seule la v3 est active. La v2c fait circuler la communauté
+# en clair sur le réseau, sans authentification ni chiffrement :
+# quiconque écoute le lien la capture, et peut alors lire toute la vue.
+# Ne l'activer que si le serveur central en place ne sait pas faire
+# autrement, et la refermer dès que possible.
+snmp_agent_enable_v3: true
+snmp_agent_enable_v2c: false
+
+# ===================================================================
+# SNMP v2c
+# ===================================================================
+# La communauté est un secret : elle vient du coffre, jamais de
+# l'inventaire en clair. Les valeurs « public » et « private » sont
+# refusées par le rôle, ce sont les premières essayées par quiconque
+# balaie un réseau.
+snmp_agent_v2c_community: ""
+
+# Accepte une communauté faible, c'est-à-dire de moins de huit caractères
+# ou valant « public », « private » ou « community ».
+#
+# Laissé à false : ce sont les premières valeurs essayées par quiconque
+# balaie un réseau. Mais quand le serveur central est déjà en service, sa
+# communauté est imposée et ne se change pas unilatéralement : refuser
+# empêcherait alors simplement de superviser. Le passer à true accepte la
+# communauté telle qu'elle est, en le signalant à chaque exécution.
+snmp_agent_v2c_accept_weak_community: false
+
+# Adresses autorisées à interroger en v2c. Par défaut, les mêmes que
+# pour la v3 : la communauté n'étant pas un secret solide, restreindre
+# la source est la seule protection réelle.
+snmp_agent_v2c_allowed_managers: "{{ snmp_agent_allowed_managers }}"
+
+# ===================================================================
+# SNMP v3
+# ===================================================================
+snmp_agent_v3_user: centreon_ro
+snmp_agent_v3_auth_protocol: SHA        # MD5 ou SHA ; SHA par défaut
+snmp_agent_v3_priv_protocol: AES        # DES ou AES ; AES par défaut
+snmp_agent_v3_auth_passphrase: ""       # obligatoire, à fournir par le coffre
+snmp_agent_v3_priv_passphrase: ""       # obligatoire, à fournir par le coffre
+
+# Niveau de sécurité exigé du gestionnaire : authentification + chiffrement.
+snmp_agent_v3_security_level: priv
+
+# Recrée l'utilisateur SNMP v3 même s'il existe déjà.
+# À passer à true uniquement pour faire tourner les passphrases : une
+# rotation impose de détruire puis recréer l'utilisateur côté agent.
+snmp_agent_v3_force_recreate_user: false
+
+# ===================================================================
+# Exposition réseau
+# ===================================================================
+snmp_agent_port: 161
+snmp_agent_listen_address: "{{ ansible_facts['default_ipv4'].address | default('127.0.0.1') }}"
+snmp_agent_listen_loopback: true
+
+# Adresses autorisées à interroger l'agent. Vide signifie « personne »,
+# ce qui est volontaire : il faut déclarer explicitement le central.
+snmp_agent_allowed_managers: []
+
+# ===================================================================
+# Périmètre de lecture
+# ===================================================================
+# Vue restreinte aux branches réellement utilisées par les plugins Linux
+# de Centreon. Le principe est celui du moindre privilège : ouvrir .1
+# entier exposerait bien plus que ce que la supervision consomme.
+snmp_agent_view_name: centreonview
+snmp_agent_view_oids:
+  - { oid: ".1.3.6.1.2.1.1", comment: "system : nom, description, uptime" }
+  - { oid: ".1.3.6.1.2.1.2", comment: "interfaces : compteurs réseau" }
+  - { oid: ".1.3.6.1.2.1.4", comment: "ip : table des adresses" }
+  - { oid: ".1.3.6.1.2.1.25", comment: "host-resources : stockage, processus, mémoire" }
+  - { oid: ".1.3.6.1.2.1.31", comment: "ifMIB : compteurs 64 bits et noms d'interfaces" }
+  - { oid: ".1.3.6.1.4.1.2021", comment: "UCD-SNMP : charge, mémoire, swap, disques" }
+  - { oid: ".1.3.6.1.4.1.8072", comment: "net-snmp : statistiques de l'agent" }
+
+# ===================================================================
+# Métadonnées et divers
+# ===================================================================
+snmp_agent_sys_location: "non renseigné"
+snmp_agent_sys_contact: "non renseigné"
+
+# Ouvre le port SNMP dans le pare-feu local, s'il est actif.
+snmp_agent_manage_firewall: true
+
+# Retire les autorisations SNMP qui ne figurent plus dans la liste des
+# gestionnaires. Sans cela, une adresse sortie de l'inventaire continuerait
+# indéfiniment d'être autorisée à interroger les agents, le pare-feu ne
+# retirant jamais de lui-même une règle qu'on ne lui demande pas de retirer.
+snmp_agent_prune_firewall_rules: true
+
+# Autorise le remplacement d'un /etc/snmp/snmpd.conf modifié par un tiers.
+# Laissé à false volontairement : sur une machine déjà supervisée par un autre
+# outil, écraser ce fichier fait tomber cette supervision sans avertissement.
+# À ne passer à true qu'après avoir vérifié que la configuration en place ne
+# sert plus à personne.
+snmp_agent_replace_foreign_config: false
+
+# Journalisation de l'agent. 'd' pour syslog daemon, sans les requêtes
+# détaillées qui saturent inutilement les journaux.
+snmp_agent_log_options: "-LSwd"
