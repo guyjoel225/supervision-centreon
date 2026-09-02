@@ -1,0 +1,31 @@
+---
+# ===================================================================
+# MODÈLE. Copier en vault.yml puis chiffrer :
+#
+#   cp vault.yml.example vault.yml
+#   $EDITOR vault.yml            # y mettre les vraies valeurs
+#   ansible-vault encrypt vault.yml
+#
+# Le fichier vault.yml chiffré peut être versionné.
+# Le fichier en clair ne doit JAMAIS l'être.
+# ===================================================================
+
+# Compte administrateur de l'interface Centreon.
+# Contrainte imposée par Centreon : au moins 12 caractères, avec au moins
+# une majuscule, une minuscule, un chiffre et un caractère parmi @$!%*?&
+vault_centreon_web_admin_password: "<CENTREON_ADMIN_PASSWORD>"
+
+# Base de données du central.
+vault_centreon_db_root_password: "<MARIADB_ROOT_PASSWORD>"
+vault_centreon_db_password: "<CENTREON_DB_PASSWORD>"
+
+# Secrets SNMP v3 partagés entre les agents et le central.
+# Au moins 8 caractères chacun, exigence du protocole.
+vault_snmp_agent_v3_auth_passphrase: "<SNMP_V3_AUTH_PASSPHRASE>"
+vault_snmp_agent_v3_priv_passphrase: "<SNMP_V3_PRIV_PASSPHRASE>"
+
+# Communauté SNMP v2c, à renseigner uniquement si snmp_agent_enable_v2c
+# est activé. Au moins 8 caractères ; « public », « private » et
+# « community » sont refusés par le rôle. Elle circule en clair sur le
+# réseau : ce n'est pas un secret solide, seulement un identifiant.
+vault_snmp_agent_v2c_community: "<SNMP_V2C_COMMUNITY>"

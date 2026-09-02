@@ -1,0 +1,20 @@
+---
+# Variables propres au serveur central.
+centreon_selinux_state: permissive
+centreon_manage_firewall: true
+centreon_run_web_installer: true
+centreon_send_statistics: false
+
+# Exposition de l'interface web. Ces valeurs sont neutres, c'est-à-dire
+# consommées à la fois par le rôle centreon_central, par le rôle
+# centreon_hosts et par le playbook de vérification.
+centreon_web_protocol: http
+centreon_web_port: 80
+centreon_web_admin_login: admin
+
+# Point d'entrée de l'API de configuration, utilisé hors des rôles
+# (playbooks/99-verify.yml notamment).
+centreon_api_url: >-
+  {{ centreon_web_protocol }}://{{ ansible_host }}:{{ centreon_web_port }}/centreon/api/index.php
+centreon_api_user: "{{ centreon_web_admin_login }}"
+centreon_api_password: "{{ centreon_web_admin_password }}"

@@ -1,0 +1,62 @@
+---
+# ===================================================================
+# Variables communes à tout l'inventaire du laboratoire.
+# Les valeurs sensibles vivent dans vault.yml, jamais ici.
+# ===================================================================
+
+# --- Connexion ------------------------------------------------------
+# Compte présent sur les cinq machines du laboratoire.
+ansible_user: osadmin
+ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+
+# --- Identité du site ----------------------------------------------
+site_name: lab
+site_domain: lab.local
+
+# --- Rôle common ----------------------------------------------------
+common_timezone: Africa/Abidjan
+common_manage_hosts_file: true
+common_ntp_enabled: true
+common_ntp_servers:
+  - 0.africa.pool.ntp.org
+  - 1.africa.pool.ntp.org
+
+# --- Adresse que les agents SNMP autorisent à les interroger --------
+# Le central est la seule machine habilitée à interroger les agents.
+centreon_central_address: "{{ hostvars['srv-central-01'].ansible_host }}"
+
+# --- Rôle snmp_agent ------------------------------------------------
+snmp_agent_v3_user: centreon_ro
+snmp_agent_v3_auth_protocol: SHA
+snmp_agent_v3_priv_protocol: AES
+# Le central, et le contrôleur Ansible.
+#
+# Déclarer le contrôleur n'est pas une commodité : c'est lui qui interroge les
+# agents dans playbooks/98-verify-snmp-agents.yml. S'il n'est pas déclaré, ce
+# playbook doit ouvrir le pare-feu puis le refermer à chaque passage, ce qui
+# produit trois modifications par exécution sur les machines protégées par
+# firewalld, et empêche donc d'atteindre un état stable.
+#
+# En production, ce choix se pose autrement : si le contrôleur n'a pas à
+# interroger les agents en temps normal, le laisser hors de cette liste et
+# accepter l'ouverture temporaire de la vérification.
+snmp_agent_allowed_managers:
+  - "{{ centreon_central_address }}"
+  - "{{ hostvars['ctrl-ansible'].ansible_host }}"
+snmp_agent_sys_location: "Abidjan / {{ site_name }}"
+snmp_agent_sys_contact: "joel <supervision@{{ site_domain }}>"
+
+# --- Rôle centreon_central -----------------------------------------
+centreon_version: "25.10"
+centreon_php_version: "8.2"
+centreon_mariadb_version: "10.11"
+centreon_web_admin_firstname: Joel
+centreon_web_admin_lastname: Konan
+centreon_web_admin_email: "supervision@{{ site_domain }}"
+
+# --- Rôle centreon_hosts -------------------------------------------
+centreon_poller_name: Central
+# Modèle créé par le rôle lui-même : les Plugin Packs de Centreon,
+# qui fournissent OS-Linux-SNMP-custom, sont réservés à l'édition
+# commerciale et absents d'une plateforme open source.
+centreon_default_host_template: SUP-Linux-SNMP

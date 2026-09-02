@@ -1,0 +1,15 @@
+---
+# Variables appliquées à tout hôte supervisé en production.
+#
+# Ce fichier n'a volontairement pas de snmp_agent_serial : le rôle applique
+# alors son défaut prudent, une machine témoin puis le parc par quarts. Le
+# laboratoire, lui, surcharge cette valeur à 100 %.
+
+snmp_agent_manage_firewall: true
+snmp_agent_listen_address: "{{ ansible_host }}"
+snmp_agent_port: 161
+
+# Valeurs par défaut de la déclaration dans Centreon, surchargées par hôte
+# dans hosts.yml quand c'est utile.
+centreon_host_alias: "{{ inventory_hostname }}"
+centreon_host_groups: [Linux-Servers]

@@ -1,0 +1,17 @@
+---
+# Variables appliquées à tout hôte supervisé, quelle que soit sa distribution.
+snmp_agent_manage_firewall: true
+snmp_agent_listen_address: "{{ ansible_host }}"
+
+# Défini ici et pas seulement dans le rôle : playbooks/99-verify.yml en a
+# besoin sans charger le rôle.
+snmp_agent_port: 161
+
+# Valeurs par défaut de la déclaration dans Centreon, surchargées par hôte
+# dans l'inventaire quand c'est utile.
+centreon_host_alias: "{{ inventory_hostname }}"
+centreon_host_groups: [Linux-Servers]
+
+# En laboratoire, les cinq machines sont traitées d'un seul tenant : la
+# prudence par vagues du rôle vise la production, pas cinq machines jetables.
+snmp_agent_serial: "100%"

@@ -1,0 +1,70 @@
+---
+# ===================================================================
+# Profil de production.
+#
+# Ce fichier n'existe pas pour configurer la production, mais pour la
+# protéger. Il neutralise explicitement tout ce que ce dépôt sait faire
+# et qui ne relève pas de la supervision, afin qu'un lancement de
+# site.yml par inadvertance reste sans effet destructeur.
+#
+# Chaque interrupteur ci-dessous correspond à un impact mesuré sur des
+# serveurs en service. Ne réactiver l'un d'eux qu'après avoir décidé
+# que cette modification est voulue, sur ces machines-là.
+# ===================================================================
+
+# --- Connexion ------------------------------------------------------
+ansible_user: osadmin
+ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+
+# --- Identité du site ----------------------------------------------
+site_name: production
+site_domain: lab.local
+
+# ===================================================================
+# Ce que le rôle common ne doit PAS faire en production
+# ===================================================================
+
+# Changer le fuseau d'un serveur en service décale l'horodatage de tous
+# ses journaux, déplace l'heure absolue de ses tâches planifiées et fausse
+# la corrélation d'incidents entre machines.
+common_manage_timezone: false
+
+# Cette tâche désinstalle systemd-timesyncd et écrase chrony.conf : une
+# source de temps interne serait remplacée par un pool public, ce qui
+# suppose une sortie internet souvent interdite. Le saut d'horloge autorisé
+# par makestep casse en outre Kerberos, la validation des certificats et
+# certaines bases de données. La synchronisation de l'heure d'un parc en
+# production relève de son exploitant, pas d'un déploiement de supervision.
+common_ntp_enabled: false
+
+# Ajouter un bloc dans /etc/hosts peut changer silencieusement une
+# résolution de nom si un nom d'inventaire entre en collision avec un nom
+# déjà résolu autrement.
+common_manage_hosts_file: false
+
+# ===================================================================
+# Supervision proprement dite
+# ===================================================================
+
+# Adresse du serveur central, seule autorisée à interroger les agents.
+centreon_central_address: 10.0.0.25
+
+snmp_agent_v3_user: centreon_ro
+snmp_agent_v3_auth_protocol: SHA
+snmp_agent_v3_priv_protocol: AES
+snmp_agent_allowed_managers:
+  - "{{ centreon_central_address }}"
+snmp_agent_sys_location: "Abidjan / production"
+snmp_agent_sys_contact: "joel <supervision@lab.local>"
+
+# Déploiement par vagues : une machine témoin d'abord, puis le parc par
+# quarts. Ne pas remonter cette valeur à 100 % sur un parc en service.
+snmp_agent_serial: [1, "25%"]
+
+# Toute défaillance arrête le déploiement. Sur un parc en production, un
+# hôte qui échoue est un signal, pas une statistique.
+snmp_agent_max_fail_percentage: 0
+
+# Laissé à false : sur une machine déjà supervisée par un autre outil,
+# écraser /etc/snmp/snmpd.conf ferait tomber cette supervision en aveugle.
+snmp_agent_replace_foreign_config: false

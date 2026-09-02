@@ -1,0 +1,22 @@
+---
+# Variables propres au serveur central en production.
+
+# SELinux reste en permissive faute de politique dédiée à Centreon. C'est une
+# réduction du niveau de sécurité, assumée et à corriger : voir la liste des
+# points bloquants pour une vraie mise en production, dans le README.
+centreon_selinux_state: permissive
+centreon_manage_firewall: true
+centreon_run_web_installer: true
+centreon_send_statistics: false
+
+# Exposition de l'interface web. Le protocole reste http faute de certificat :
+# c'est le premier point à traiter avant une exploitation réelle.
+centreon_web_protocol: http
+centreon_web_port: 80
+centreon_web_admin_login: admin
+
+# Point d'entrée de l'API de configuration, utilisé hors des rôles.
+centreon_api_url: >-
+  {{ centreon_web_protocol }}://{{ ansible_host }}:{{ centreon_web_port }}/centreon/api/index.php
+centreon_api_user: "{{ centreon_web_admin_login }}"
+centreon_api_password: "{{ centreon_web_admin_password }}"
