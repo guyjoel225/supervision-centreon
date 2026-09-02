@@ -1,0 +1,87 @@
+---
+# ===================================================================
+# Diagnostic d'un agent SNMP dont la configuration n'a pas été écrite
+# par ce rôle.
+#
+# Le rôle refuse d'écraser un /etc/snmp/snmpd.conf modifié : la machine
+# peut être supervisée par un autre outil, que l'écrasement ferait
+# tomber sans alerte. Ce playbook montre ce que contient réellement le
+# fichier, afin que la décision de l'écraser soit prise en connaissance
+# de cause plutôt qu'à l'aveugle.
+#
+# Les valeurs sensibles ne sont jamais affichées : communautés,
+# utilisateurs v3 et phrases secrètes sont remplacées par un marqueur.
+# Seul le nom des directives est montré.
+#
+# Ne modifie rien.
+# Usage : make diag-agent LIMIT=<hôte>
+# ===================================================================
+
+- name: Montrer la configuration SNMP existante sans divulguer ses secrets
+  hosts: monitored
+  gather_facts: true
+  tasks:
+
+    - name: Relever le fichier de configuration de l'agent
+      ansible.builtin.slurp:
+        src: /etc/snmp/snmpd.conf
+      register: _diag_snmpd_conf
+      failed_when: false
+
+    - name: Présenter les directives, valeurs masquées
+      vars:
+        # Directives qui portent un secret ou une adresse interne. Le nom est
+        # conservé, la valeur remplacée : on doit pouvoir juger de ce que fait
+        # la configuration sans en extraire un identifiant.
+        _sensibles: >-
+          rocommunity6?|rwcommunity6?|com2sec6?|createUser|usmUser|authuser|
+          trapcommunity|trapsink|informsink|trap2sink|rouser|rwuser
+        _contenu: >-
+          {{ (_diag_snmpd_conf.content | default('') | b64decode)
+             | regex_replace('(?m)^([ \t]*(?:' ~ (_sensibles | replace('\n', '') | replace(' ', '')) ~ '))[ \t]+.*$',
+                             '\1 <valeur masquée>') }}
+      ansible.builtin.debug:
+        msg: >-
+          {{ _contenu.splitlines()
+             | reject('match', '^[ \t]*#')
+             | reject('match', '^[ \t]*$')
+             | list
+             | default(['fichier absent ou illisible'], true) }}
+
+    - name: Établir si une supervision tierce semble en place
+      vars:
+        _lignes: >-
+          {{ (_diag_snmpd_conf.content | default('') | b64decode).splitlines()
+             | reject('match', '^[ \t]*#') | list }}
+      ansible.builtin.debug:
+        msg:
+          - >-
+            destination de traps déclarée :
+            {{ 'OUI, cette machine envoie ses alertes ailleurs'
+               if (_lignes | select('match', '^[ \t]*(trapsink|trap2sink|informsink)') | list | length) > 0
+               else 'non' }}
+          - >-
+            accès en écriture déclaré :
+            {{ 'OUI, un tiers peut modifier cette machine par SNMP'
+               if (_lignes | select('match', '^[ \t]*(rwcommunity|rwuser)') | list | length) > 0
+               else 'non' }}
+          - >-
+            marque de ce rôle :
+            {{ 'présente'
+               if 'Agent SNMP v3 en lecture seule pour la supervision Centreon'
+                  in (_diag_snmpd_conf.content | default('') | b64decode)
+               else 'ABSENTE, le fichier vient d une autre source' }}
+          - "directives actives : {{ _lignes | reject('match', '^[ \t]*$') | list | length }}"
+
+    - name: Relever l'état de l'agent et son écoute
+      ansible.builtin.command:
+        cmd: ss -lnup
+      register: _diag_ecoute
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter l'état de l'agent
+      ansible.builtin.debug:
+        msg:
+          - "port 161 en écoute : {{ _diag_ecoute.stdout_lines | default([]) | select('search', ':161\\b') | list | default(['AUCUNE'], true) }}"
+          - "système : {{ ansible_distribution }} {{ ansible_distribution_version }}"

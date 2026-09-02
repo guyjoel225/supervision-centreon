@@ -1,0 +1,238 @@
+---
+# ===================================================================
+# Relève les erreurs des journaux quand l'assistant d'installation
+# répond 500.
+#
+# Une erreur 500 est une erreur fatale de PHP : le serveur ne renvoie
+# rien d'exploitable, et la cause n'est visible que dans les journaux
+# de la machine, qui exigent des privilèges. Ce playbook ne modifie
+# rien, il lit.
+#
+# Usage : ansible-playbook playbooks/91-diagnostic-installeur.yml -K
+# ===================================================================
+
+- name: Relever les erreurs de l'assistant d'installation
+  hosts: centreon_central
+  gather_facts: true
+  vars:
+    # Emplacements courants. Celui que PHP déclare réellement est ajouté à
+    # l'exécution : le deviner ne suffit pas, et chercher au mauvais endroit
+    # fait conclure à tort qu'aucune erreur n'a été enregistrée.
+    _journaux:
+      - /var/log/php-fpm/www-error.log
+      - /var/log/httpd/error_log
+      - /var/log/centreon/prod.web.log
+      - /var/log/centreon/centreon-web.log
+      - /var/log/centreon/centreon-error.log
+  tasks:
+
+    # Ce playbook n'appelle pas le rôle centreon_central : ses variables ne
+    # sont donc pas chargées. On lit ses valeurs par défaut, faute de quoi
+    # toute variable du rôle employée ici serait indéfinie.
+    - name: Charger les valeurs par défaut du rôle centreon_central
+      ansible.builtin.include_vars:
+        dir: "{{ playbook_dir }}/../roles/centreon_central/defaults"
+
+    # php-fpm est configuré pour écrire dans un fichier. Si le répertoire qui
+    # doit l'accueillir n'existe pas ou ne lui est pas inscriptible, les
+    # erreurs sont perdues : on obtient un code 500 sans la moindre trace,
+    # ce qui rend le diagnostic impossible.
+    - name: Vérifier le répertoire de journalisation de php-fpm
+      ansible.builtin.stat:
+        path: /var/log/php-fpm
+      register: _diag_repertoire_log
+
+    # Les limites vues par la ligne de commande ne sont pas celles de php-fpm :
+    # la CLI ignore max_execution_time, et php-fpm applique ses propres
+    # php_admin_value. Seule une page servie par le serveur web dit la vérité
+    # sur ce que subit l'assistant d'installation.
+    - name: Déposer une page qui relève les limites vues par le serveur web
+      ansible.builtin.copy:
+        dest: /usr/share/centreon/www/diag-limites.php
+        owner: "{{ centreon_central_web_user }}"
+        group: centreon
+        mode: "0644"
+        content: |
+          <?php
+          foreach (['max_execution_time', 'memory_limit', 'post_max_size',
+                    'upload_max_filesize', 'max_input_time', 'max_input_vars',
+                    'date.timezone', 'log_errors', 'error_log'] as $c) {
+              echo $c . '=' . (ini_get($c) === '' ? '(vide)' : ini_get($c)) . "\n";
+          }
+          echo 'utilisateur=' . (function_exists('posix_getpwuid')
+                ? posix_getpwuid(posix_geteuid())['name'] : get_current_user()) . "\n";
+      changed_when: false
+
+    - name: Interroger cette page par le serveur web
+      ansible.builtin.uri:
+        url: "{{ centreon_web_protocol | default('http') }}://{{ ansible_host }}:{{ centreon_web_port | default(80) }}/centreon/diag-limites.php"
+        return_content: true
+      register: _diag_limites_web
+      changed_when: false
+      failed_when: false
+
+    - name: Effacer la page de relevé
+      ansible.builtin.file:
+        path: /usr/share/centreon/www/diag-limites.php
+        state: absent
+      changed_when: false
+
+    - name: Présenter les limites réellement appliquées à l'assistant
+      ansible.builtin.debug:
+        msg: "{{ (_diag_limites_web.content | default('relevé impossible')).split('\n') | select | list }}"
+
+    - name: Retenir le journal que PHP déclare employer
+      ansible.builtin.set_fact:
+        _journaux: >-
+          {{ (_journaux + [(_diag_limites_web.content | default(''))
+             | regex_search('error_log=(\S+)', '\1') | first | default('', true)])
+             | select | unique | list }}
+
+    - name: Repérer les journaux présents
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ _journaux }}"
+      register: _diag_journaux
+
+    - name: Relever les dernières erreurs de chaque journal
+      ansible.builtin.command:
+        cmd: "tail -n 60 {{ item.item }}"
+      loop: "{{ _diag_journaux.results | selectattr('stat.exists') | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: _diag_contenu
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter ce que disent les journaux
+      vars:
+        _erreurs: >-
+          {{ (item.stdout_lines | default([])
+              | select('search', '(?i)fatal|error|exception|warning')
+              | list)[-12:] }}
+      ansible.builtin.debug:
+        msg:
+          - "journal : {{ item.item.item }}"
+          - "{{ _erreurs | default(['aucune erreur dans les 60 dernières lignes'], true) }}"
+      loop: "{{ _diag_contenu.results }}"
+      loop_control:
+        label: "{{ item.item.item }}"
+
+    # Quand catch_workers_output n'est pas activé, php-fpm n'écrit pas de
+    # fichier de journal : ses erreurs partent au journal systemd. C'est le
+    # cas par défaut sur Enterprise Linux, et c'est là que se trouvent les
+    # erreurs fatales qui produisent un code 500.
+    - name: Relever les erreurs de php-fpm dans le journal systemd
+      ansible.builtin.command:
+        cmd: journalctl -u php-fpm --since "2 hours ago" --no-pager
+      register: _diag_journalctl_fpm
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter les erreurs de php-fpm
+      vars:
+        _erreurs_fpm: >-
+          {{ (_diag_journalctl_fpm.stdout_lines | default([])
+              | select('search', '(?i)fatal|error|exception|warning|denied')
+              | list)[-20:] }}
+      ansible.builtin.debug:
+        msg: "{{ _erreurs_fpm | default(['aucune erreur dans le journal de php-fpm'], true) }}"
+
+    - name: Relever où php-fpm envoie ses erreurs
+      ansible.builtin.command:
+        cmd: >-
+          grep -hE "^\s*(php_admin_value\[error_log\]|error_log|catch_workers_output|php_flag\[display_errors\])"
+          /etc/php-fpm.conf /etc/php-fpm.d/www.conf
+      register: _diag_config_fpm
+      changed_when: false
+      failed_when: false
+
+    - name: Vérifier l'appartenance du compte web au groupe centreon
+      ansible.builtin.command:
+        cmd: "id {{ centreon_central_web_user | default('apache') }}"
+      register: _diag_groupes
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter la configuration de journalisation et les groupes
+      ansible.builtin.debug:
+        msg:
+          - "journalisation de php-fpm : {{ _diag_config_fpm.stdout_lines | default(['non configurée, les erreurs vont au journal systemd']) }}"
+          - "comptes et groupes du compte web : {{ _diag_groupes.stdout | default('relevé impossible') | trim }}"
+
+
+    - name: Relever les limites d'exécution de PHP
+      ansible.builtin.command:
+        cmd: >-
+          php -r "echo 'max_execution_time=' . ini_get('max_execution_time')
+          . ' memory_limit=' . ini_get('memory_limit')
+          . ' log_errors=' . ini_get('log_errors')
+          . ' display_errors=' . ini_get('display_errors');"
+      register: _diag_limites
+      changed_when: false
+      failed_when: false
+
+    - name: Relever les limites propres à php-fpm
+      ansible.builtin.command:
+        cmd: >-
+          grep -hE "^\s*(request_terminate_timeout|php_admin_value\[memory_limit\]|php_admin_value\[max_execution_time\])"
+          /etc/php-fpm.d/www.conf /etc/php-fpm.conf
+      register: _diag_limites_fpm
+      changed_when: false
+      failed_when: false
+
+    - name: Relever l'état des bases de Centreon
+      ansible.builtin.command:
+        cmd: >-
+          mariadb -N -B -e
+          "SELECT table_schema, COUNT(*) FROM information_schema.tables
+          WHERE table_schema IN ('{{ centreon_central_db_configuration }}',
+          '{{ centreon_central_db_storage }}') GROUP BY table_schema"
+      register: _diag_bases
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter les limites et l'état des bases
+      ansible.builtin.debug:
+        msg:
+          - "répertoire /var/log/php-fpm : {{ 'présent' if _diag_repertoire_log.stat.exists else 'ABSENT, les erreurs de PHP sont donc perdues' }}"
+          - "limites PHP : {{ _diag_limites.stdout | default('relevé impossible') | trim }}"
+          - "limites php-fpm : {{ _diag_limites_fpm.stdout_lines | default(['aucune limite propre']) }}"
+          - "tables par base : {{ _diag_bases.stdout_lines | default(['aucune base créée']) }}"
+
+    # Une erreur fatale survient souvent sur une extension PHP manquante ou
+    # un droit d'écriture absent : ces deux points sont relevés d'office.
+    - name: Relever les extensions PHP chargées
+      ansible.builtin.command:
+        cmd: php -m
+      register: _diag_extensions
+      changed_when: false
+
+    - name: Vérifier les extensions dont Centreon a besoin
+      ansible.builtin.assert:
+        that:
+          - item | lower in (_diag_extensions.stdout | lower)
+        fail_msg: "L'extension PHP « {{ item }} » est absente, ce qui peut provoquer une erreur fatale."
+        success_msg: "Extension « {{ item }} » présente."
+        quiet: true
+      loop: [pdo_mysql, mysqlnd, json, mbstring, gd, intl, curl, xml, zip]
+      failed_when: false
+
+    - name: Relever les droits des répertoires écrits pendant l'installation
+      ansible.builtin.command:
+        cmd: "namei -l {{ item }}"
+      loop:
+        - /etc/centreon
+        - /var/lib/centreon
+        - /var/cache/centreon
+        - /usr/share/centreon/www/install/tmp
+      register: _diag_droits
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter les droits relevés
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines | default(['chemin absent']) }}"
+      loop: "{{ _diag_droits.results }}"
+      loop_control:
+        label: "{{ item.item }}"

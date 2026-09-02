@@ -1,0 +1,83 @@
+---
+# ===================================================================
+# Diagnostic d'un refus de connexion à l'interface Centreon.
+#
+# Ne modifie rien. Vérifie, dans l'ordre où elles empêchent de se
+# connecter : l'existence des bases, celle du compte, son état, et la
+# concordance entre le mot de passe du coffre et celui enregistré.
+#
+# Usage : ansible-playbook playbooks/92-diagnostic-connexion.yml -K
+# ===================================================================
+
+- name: Diagnostiquer le refus de connexion
+  hosts: centreon_central
+  gather_facts: true
+  tasks:
+
+    - name: Charger les valeurs par défaut du rôle centreon_central
+      ansible.builtin.include_vars:
+        dir: "{{ playbook_dir }}/../roles/centreon_central/defaults"
+
+    - name: Compter les tables de chaque base
+      ansible.builtin.command:
+        cmd: >-
+          mariadb -N -B -e
+          "SELECT CONCAT(table_schema,' : ',COUNT(*),' tables')
+          FROM information_schema.tables
+          WHERE table_schema IN ('{{ centreon_central_db_configuration }}',
+          '{{ centreon_central_db_storage }}') GROUP BY table_schema"
+      register: _diag_tables
+      changed_when: false
+      failed_when: false
+
+    - name: Relever les comptes déclarés dans Centreon
+      ansible.builtin.command:
+        cmd: >-
+          mariadb -N -B {{ centreon_central_db_configuration }} -e
+          "SELECT CONCAT(contact_alias, ' | admin=', contact_admin,
+          ' | actif=', contact_activate,
+          ' | mot de passe enregistré=', IF(LENGTH(IFNULL(contact_passwd,''))>0,'oui','NON'),
+          ' | verrouillé=', IFNULL(contact_locked,'?'))
+          FROM contact"
+      register: _diag_comptes
+      changed_when: false
+      failed_when: false
+
+    - name: Relever la base réellement pointée par la configuration
+      ansible.builtin.command:
+        cmd: grep -oE "\\\$conf_centreon\\['[a-z]+'\\] *= *'[^']*'" /etc/centreon/centreon.conf.php
+      register: _diag_conf
+      changed_when: false
+      failed_when: false
+
+    - name: Relever les tentatives de connexion refusées
+      ansible.builtin.command:
+        cmd: tail -n 30 /var/log/centreon/login.log
+      register: _diag_login
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter le diagnostic
+      ansible.builtin.debug:
+        msg:
+          - "bases : {{ _diag_tables.stdout_lines | default(['aucune base trouvée']) }}"
+          - "comptes : {{ _diag_comptes.stdout_lines | default(['aucun compte, ou base inaccessible']) }}"
+          - "configuration : {{ _diag_conf.stdout_lines | default(['lecture impossible']) | reject('search', 'pass') | list }}"
+          - "dernières connexions : {{ (_diag_login.stdout_lines | default([]))[-6:] | default(['aucun journal de connexion'], true) }}"
+
+    - name: Nommer la cause la plus probable
+      ansible.builtin.debug:
+        msg: >-
+          {% if _diag_tables.stdout | default('') | length == 0 %}
+          Aucune base n'a été trouvée : la plateforme pointe sur des bases
+          absentes. L'installation doit être refaite entièrement.
+          {% elif _diag_comptes.stdout | default('') | length == 0 %}
+          Les bases existent mais aucun compte n'y est déclaré : l'étape de
+          création de l'administrateur n'a pas abouti.
+          {% elif 'NON' in (_diag_comptes.stdout | default('')) %}
+          Le compte existe mais aucun mot de passe n'y est enregistré.
+          {% else %}
+          Le compte existe avec un mot de passe enregistré. Le refus vient
+          donc d'une valeur qui ne correspond pas à celle saisie lors de
+          l'installation, ou d'un compte verrouillé après trop d'essais.
+          {% endif %}

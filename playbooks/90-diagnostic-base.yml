@@ -1,0 +1,225 @@
+---
+# ===================================================================
+# Diagnostic de la connexion entre Centreon et sa base de données.
+#
+# À lancer quand l'assistant d'installation refuse la base avec
+# « Please check the root database username and password ». Ce message
+# est générique et ne dit pas laquelle des causes possibles s'applique.
+#
+# Ce playbook ne modifie rien. Il relève, dans l'ordre où elles peuvent
+# faire échouer la connexion :
+#   - le mode d'authentification de root côté MariaDB
+#   - le socket réellement ouvert par le serveur
+#   - le socket que PHP cherche, qui n'est pas forcément le même
+#   - une connexion PDO reproduisant exactement celle de Centreon
+#
+# Usage : ansible-playbook playbooks/90-diagnostic-base.yml -K
+# ===================================================================
+
+- name: Diagnostiquer l'accès de Centreon à sa base
+  hosts: centreon_central
+  gather_facts: true
+  tasks:
+
+    # Les variables du rôle ne sont pas chargées ici, ce playbook ne
+    # l'appelant pas. On lit ses valeurs par défaut plutôt que de les
+    # recopier : un diagnostic qui teste autre chose que ce que fait le
+    # rôle ne diagnostique rien.
+    - name: Charger les valeurs par défaut du rôle centreon_central
+      ansible.builtin.include_vars:
+        dir: "{{ playbook_dir }}/../roles/centreon_central/defaults"
+
+    - name: Relever le mode d'authentification des comptes root
+      ansible.builtin.command:
+        cmd: >-
+          mariadb -N -B -e
+          "SELECT CONCAT(user,'@',host,' -> ',plugin) FROM mysql.user WHERE user='root'"
+      register: _diag_plugin
+      changed_when: false
+      failed_when: false
+
+    # Depuis MariaDB 10.4, mysql.user n'est qu'une vue et n'affiche qu'une
+    # méthode d'authentification. Un compte peut en accepter plusieurs, par
+    # exemple unix_socket ET mysql_native_password : c'est le contenu de
+    # mysql.global_priv qui fait foi.
+    - name: Relever toutes les méthodes d'authentification de root
+      ansible.builtin.command:
+        cmd: >-
+          mariadb -N -B -e
+          "SELECT CONCAT(User,'@',Host,' : ',JSON_EXTRACT(Priv,'$.plugin'),
+          ' | auth_or = ', IFNULL(JSON_EXTRACT(Priv,'$.auth_or'),'absent'))
+          FROM mysql.global_priv WHERE User='root'"
+      register: _diag_global_priv
+      changed_when: false
+      failed_when: false
+
+    - name: Relever le socket ouvert par le serveur
+      ansible.builtin.command:
+        cmd: mariadb -N -B -e "SELECT @@socket"
+      register: _diag_socket_serveur
+      changed_when: false
+      failed_when: false
+
+    - name: Relever le socket que PHP cherche
+      ansible.builtin.command:
+        cmd: "php -r \"echo ini_get('pdo_mysql.default_socket');\""
+      register: _diag_socket_php
+      changed_when: false
+      failed_when: false
+
+    # Reproduit la connexion que tente l'assistant : PDO, hôte « localhost »,
+    # ce qui fait passer par le socket et non par le réseau.
+    - name: Déposer un test de connexion identique à celui de Centreon
+      ansible.builtin.copy:
+        dest: /tmp/diag-centreon-base.php
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          <?php
+          try {
+              $db = new PDO('mysql:host={{ centreon_central_db_host }};port={{ centreon_central_db_port }}',
+                            '{{ centreon_central_db_root_user }}',
+                            '{{ centreon_central_db_root_password }}');
+              echo "CONNEXION REUSSIE";
+          } catch (Exception $e) {
+              echo "ECHEC : " . $e->getMessage();
+          }
+      no_log: true
+      changed_when: false
+
+    - name: Tenter la connexion en tant que root
+      ansible.builtin.command:
+        cmd: php /tmp/diag-centreon-base.php
+      register: _diag_pdo
+      changed_when: false
+      failed_when: false
+
+    # L'assistant ne tourne pas sous root mais sous le compte de php-fpm.
+    # Si le répertoire du socket ne lui est pas traversable, la connexion
+    # échoue alors que la même tentative réussit en root, ce qui donne un
+    # diagnostic trompeur.
+    - name: Relever le compte sous lequel tourne php-fpm
+      ansible.builtin.command:
+        cmd: ps -o user= -C php-fpm
+      register: _diag_compte_fpm
+      changed_when: false
+      failed_when: false
+
+    - name: Rendre le test lisible par le compte de php-fpm
+      ansible.builtin.file:
+        path: /tmp/diag-centreon-base.php
+        mode: "0644"
+      changed_when: false
+
+    - name: Tenter la connexion sous le compte de php-fpm
+      become: true
+      become_user: "{{ _diag_utilisateur_web }}"
+      ansible.builtin.command:
+        cmd: php /tmp/diag-centreon-base.php
+      register: _diag_pdo_web
+      changed_when: false
+      failed_when: false
+      vars:
+        _diag_utilisateur_web: >-
+          {{ (_diag_compte_fpm.stdout_lines | reject('equalto', 'root')
+              | list | first) | default('apache', true) }}
+
+    # Une connexion par 127.0.0.1 passe par le réseau et non par le socket,
+    # ce qui écarte complètement l'authentification unix_socket.
+    - name: Déposer un test de connexion par le réseau
+      ansible.builtin.copy:
+        dest: /tmp/diag-centreon-tcp.php
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          <?php
+          try {
+              $db = new PDO('mysql:host=127.0.0.1;port={{ centreon_central_db_port }}',
+                            '{{ centreon_central_db_root_user }}',
+                            '{{ centreon_central_db_root_password }}');
+              echo "CONNEXION REUSSIE";
+          } catch (Exception $e) {
+              echo "ECHEC : " . $e->getMessage();
+          }
+      no_log: true
+      changed_when: false
+
+    - name: Tenter la connexion par le réseau sous le compte de php-fpm
+      become: true
+      become_user: "{{ (_diag_compte_fpm.stdout_lines | reject('equalto', 'root') | list | first) | default('apache', true) }}"
+      ansible.builtin.command:
+        cmd: php /tmp/diag-centreon-tcp.php
+      register: _diag_pdo_tcp
+      changed_when: false
+      failed_when: false
+
+    - name: Effacer le test réseau
+      ansible.builtin.file:
+        path: /tmp/diag-centreon-tcp.php
+        state: absent
+      changed_when: false
+
+    - name: Relever les droits du chemin vers le socket
+      ansible.builtin.command:
+        cmd: "namei -l {{ centreon_central_db_socket }}"
+      register: _diag_droits_socket
+      changed_when: false
+      failed_when: false
+
+    - name: Effacer le test
+      ansible.builtin.file:
+        path: /tmp/diag-centreon-base.php
+        state: absent
+      changed_when: false
+
+    - name: Présenter le diagnostic
+      ansible.builtin.debug:
+        msg:
+          - "authentification de root (vue mysql.user) : {{ _diag_plugin.stdout_lines | default(['relevé impossible']) }}"
+          - "méthodes réelles (mysql.global_priv) :"
+          - "{{ _diag_global_priv.stdout_lines | default(['relevé impossible']) }}"
+          - "socket ouvert par MariaDB : {{ _diag_socket_serveur.stdout | default('inconnu') | trim }}"
+          - "socket cherché par PHP    : {{ _diag_socket_php.stdout | default('') | trim | default('non défini, PHP emploie sa valeur de compilation', true) }}"
+          - "socket attendu par le rôle: {{ centreon_central_db_socket }}"
+          - "connexion PDO en root     : {{ _diag_pdo.stdout | default('non testée') | trim }}"
+          - "compte de php-fpm         : {{ (_diag_compte_fpm.stdout_lines | reject('equalto', 'root') | list | first) | default('non détecté', true) }}"
+          - "connexion par socket sous ce compte : {{ _diag_pdo_web.stdout | default('non testée') | trim }}"
+          - "connexion par 127.0.0.1 sous ce compte : {{ _diag_pdo_tcp.stdout | default('non testée') | trim }}"
+          - "droits du chemin du socket :"
+          - "{{ _diag_droits_socket.stdout_lines | default(['relevé impossible']) }}"
+
+    - name: Nommer la cause la plus probable
+      ansible.builtin.debug:
+        msg: >-
+          {% if 'unix_socket' in (_diag_plugin.stdout | default('')) %}
+          root est encore authentifié par socket Unix côté MariaDB : c'est la
+          cause. La bascule vers mysql_native_password n'a pas eu lieu.
+          {% elif 'CONNEXION REUSSIE' in (_diag_pdo.stdout | default(''))
+                  and 'CONNEXION REUSSIE' not in (_diag_pdo_web.stdout | default('')) %}
+          {% if 'CONNEXION REUSSIE' in (_diag_pdo_tcp.stdout | default('')) %}
+          La connexion échoue par le socket sous le compte de l'assistant mais
+          réussit par 127.0.0.1. root accepte donc encore l'authentification
+          unix_socket, qui refuse tout compte système autre que lui : c'est le
+          code 1698. Deux corrections : ne laisser à root que
+          mysql_native_password, ou faire porter l'installation sur 127.0.0.1
+          plutôt que localhost.
+          {% else %}
+          La connexion réussit en root et échoue sous le compte de l'assistant,
+          par socket comme par le réseau. Se reporter aux méthodes
+          d'authentification relevées dans mysql.global_priv ci-dessus.
+          {% endif %}
+          {% elif 'CONNEXION REUSSIE' in (_diag_pdo_web.stdout | default('')) %}
+          PHP joint la base sous le compte de l'assistant. La cause est donc
+          ailleurs : vérifier ce que l'assistant reçoit réellement, et les
+          prérequis MariaDB que Centreon contrôle.
+          {% elif (_diag_socket_php.stdout | default('')) not in
+                  [(_diag_socket_serveur.stdout | default('x')), '', '(non défini)'] %}
+          PHP cherche son socket ailleurs que là où MariaDB l'ouvre. C'est la
+          cause : la connexion par « localhost » passe par le socket.
+          {% else %}
+          Cause non déterminée par ce relevé. Se reporter au message de la
+          connexion PDO ci-dessus, qui est le plus proche de ce que fait
+          l'assistant.
+          {% endif %}

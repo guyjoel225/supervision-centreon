@@ -1,0 +1,221 @@
+---
+# ===================================================================
+# Diagnostic d'un échec de génération de la configuration.
+#
+# L'interface de programmation répond « consistency error » sans nommer
+# l'objet fautif. Ce playbook relève les causes les plus fréquentes :
+# une macro de ressource absente, une commande sans ligne, un modèle de
+# service sans commande.
+#
+# Ne modifie rien.
+# Usage : ansible-playbook playbooks/93-diagnostic-generation.yml -K
+# ===================================================================
+
+- name: Diagnostiquer l'échec de génération
+  hosts: centreon_central
+  gather_facts: true
+  tasks:
+
+    - name: Charger les valeurs par défaut du rôle centreon_hosts
+      ansible.builtin.include_vars:
+        dir: "{{ playbook_dir }}/../roles/centreon_hosts/defaults"
+
+    - name: Relever les macros de ressources déclarées
+      ansible.builtin.command:
+        cmd: >-
+          mariadb -N -B centreon -e
+          "SELECT CONCAT(resource_name,' = ',resource_line,
+          ' | activée=', resource_activate) FROM cfg_resource"
+      register: _diag_ressources
+      changed_when: false
+      failed_when: false
+
+    - name: Relever les commandes créées par le rôle
+      ansible.builtin.command:
+        cmd: >-
+          mariadb -N -B centreon -e
+          "SELECT CONCAT(command_name,' -> ',IFNULL(command_line,'AUCUNE LIGNE'))
+          FROM command WHERE command_name LIKE 'check_sup%'"
+      register: _diag_commandes
+      changed_when: false
+      failed_when: false
+
+    - name: Relever les modèles de services et leur commande
+      ansible.builtin.command:
+        cmd: >-
+          mariadb -N -B centreon -e
+          "SELECT CONCAT(s.service_description,' -> ',
+          IFNULL(c.command_name,'AUCUNE COMMANDE'),
+          ' | période=', IFNULL(t.tp_name,'AUCUNE'))
+          FROM service s
+          LEFT JOIN command c ON c.command_id = s.command_command_id
+          LEFT JOIN timeperiod t ON t.tp_id = s.timeperiod_tp_id
+          WHERE s.service_register='0' AND s.service_description LIKE 'SUP-%'"
+      register: _diag_modeles
+      changed_when: false
+      failed_when: false
+
+    - name: Relever les macros posées sur un hôte témoin
+      ansible.builtin.command:
+        cmd: >-
+          mariadb -N -B centreon -e
+          "SELECT CONCAT(h.host_name,' : ',m.host_macro_name)
+          FROM on_demand_macro_host m
+          JOIN host h ON h.host_id = m.host_host_id
+          ORDER BY h.host_name LIMIT 12"
+      register: _diag_macros
+      changed_when: false
+      failed_when: false
+
+    # Si aucun fichier n'est produit, la génération échoue avant d'écrire :
+    # le message parlant des fichiers exportés est alors trompeur, et la
+    # cause est en amont, souvent un répertoire de travail absent ou non
+    # inscriptible par le compte du serveur web.
+    - name: Relever les répertoires de génération
+      ansible.builtin.command:
+        cmd: "namei -l {{ item }}"
+      loop:
+        - /var/cache/centreon/config/engine
+        - /var/cache/centreon/config/broker
+        - /var/cache/centreon/config/export
+        - /etc/centreon-engine
+        - /etc/centreon-broker
+      register: _diag_repertoires
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter les droits des répertoires de génération
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines | default(['CHEMIN ABSENT : ' ~ item.item]) }}"
+      loop: "{{ _diag_repertoires.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Relever les erreurs laissées par la dernière génération
+      ansible.builtin.command:
+        cmd: tail -n 120 /var/log/centreon/prod.web.log
+      register: _diag_log_generation
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter ces erreurs
+      vars:
+        _recentes: >-
+          {{ (_diag_log_generation.stdout_lines | default([])
+              | select('search', '(?i)generate|engine|broker|export|consistency|permission|denied'))[-15:] }}
+      ansible.builtin.debug:
+        msg: "{{ _recentes | default(['aucune erreur liée à la génération'], true) }}"
+
+    # Ce que la génération a réellement produit. Si un fichier attendu manque
+    # ici, elle s'est arrêtée en cours d'écriture, et c'est la seule piste qui
+    # vaille : le message rendu par l'interface de programmation, lui, peut
+    # être vide.
+    - name: Relever les fichiers produits par la génération
+      ansible.builtin.find:
+        paths: /var/cache/centreon/config/engine
+        patterns: "*.cfg,*.json"
+        recurse: true
+      register: _diag_produits
+
+    - name: Présenter les fichiers produits et leur taille
+      ansible.builtin.debug:
+        msg: >-
+          {{ _diag_produits.files
+             | map(attribute='path')
+             | zip(_diag_produits.files | map(attribute='size'))
+             | map('join', ' : ') | sort
+             | default(['AUCUN FICHIER PRODUIT'], true) }}
+
+    # Le message « consistency error » vient d'une validation que Centreon
+    # fait en lançant le moteur sur les fichiers qu'il vient de produire.
+    # Relancer cette validation à la main donne le détail que l'interface de
+    # programmation ne renvoie pas.
+    - name: Repérer les fichiers de configuration produits
+      ansible.builtin.find:
+        paths: /var/cache/centreon/config/engine
+        patterns: centengine.cfg
+        recurse: true
+      register: _diag_fichiers
+
+    # La configuration produite désigne ses inclusions par leur emplacement
+    # final, /etc/centreon-engine, où rien n'est encore déployé. La valider
+    # telle quelle ferait accuser un fichier absent qui n'a rien à voir avec
+    # la panne. On la recopie donc, inclusions réécrites vers la copie.
+    - name: Préparer une copie pour valider sans rien déployer
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: -validation-moteur
+      register: _diag_copie
+      changed_when: false
+      when: _diag_fichiers.files | length > 0
+
+    - name: Recopier la configuration produite
+      ansible.builtin.copy:
+        src: "{{ (_diag_fichiers.files | first).path | dirname }}/"
+        dest: "{{ _diag_copie.path }}/"
+        remote_src: true
+        mode: preserve
+      changed_when: false
+      when: _diag_fichiers.files | length > 0
+
+    - name: Faire pointer les inclusions vers cette copie
+      ansible.builtin.replace:
+        path: "{{ _diag_copie.path }}/centengine.cfg"
+        regexp: /etc/centreon-engine/
+        replace: "{{ _diag_copie.path }}/"
+      changed_when: false
+      when: _diag_fichiers.files | length > 0
+
+    - name: Demander au moteur de valider ce qui a été produit
+      ansible.builtin.command:
+        cmd: "/usr/sbin/centengine -v {{ _diag_copie.path }}/centengine.cfg"
+      register: _diag_validation
+      changed_when: false
+      failed_when: false
+      when: _diag_fichiers.files | length > 0
+
+    - name: Présenter ce que le moteur reproche à la configuration
+      vars:
+        _reproches: >-
+          {{ ((_diag_validation.stdout_lines | default([])
+               + _diag_validation.stderr_lines | default([]))
+              | select('search', '(?i)error|cannot|unable|invalid'))[-15:] }}
+      ansible.builtin.debug:
+        msg: "{{ _reproches | default(['aucun reproche du moteur'], true) }}"
+      when: _diag_fichiers.files | length > 0
+
+    - name: Retirer la copie de validation
+      ansible.builtin.file:
+        path: "{{ _diag_copie.path }}"
+        state: absent
+      changed_when: false
+      when: _diag_fichiers.files | length > 0
+
+    - name: Présenter le diagnostic
+      ansible.builtin.debug:
+        msg:
+          - "macros de ressources : {{ _diag_ressources.stdout_lines | default(['AUCUNE, c est la cause la plus probable']) }}"
+          - "commandes du rôle : {{ _diag_commandes.stdout_lines | default(['aucune']) }}"
+          - "modèles de services : {{ _diag_modeles.stdout_lines | default(['aucun']) }}"
+          - "macros des hôtes : {{ _diag_macros.stdout_lines | default(['aucune']) }}"
+
+    - name: Nommer la cause la plus probable
+      ansible.builtin.debug:
+        msg: >-
+          {% if 'USER1' not in (_diag_ressources.stdout | default('')) %}
+          La macro de ressource $USER1$ n'est pas déclarée. Toute commande qui
+          l'emploie, dont la vérification d'hôte, rend la configuration
+          incohérente et bloque la génération.
+          {% elif 'AUCUNE COMMANDE' in (_diag_modeles.stdout | default('')) %}
+          Un modèle de service n'a pas de commande associée : la génération ne
+          sait pas quoi exécuter pour lui.
+          {% elif 'AUCUNE LIGNE' in (_diag_commandes.stdout | default('')) %}
+          Une commande existe sans ligne d'exécution.
+          {% elif (_diag_produits.files | default([]) | length) == 0 %}
+          La génération n'a produit aucun fichier : elle échoue avant d'écrire,
+          et le message parlant des fichiers exportés est trompeur.
+          {% else %}
+          Les objets relevés semblent complets et des fichiers ont été produits.
+          Se fier au reproche du moteur ci-dessus, et à lui seul : le message
+          rendu par l'interface de programmation peut être vide.
+          {% endif %}
