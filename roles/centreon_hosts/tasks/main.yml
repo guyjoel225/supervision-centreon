@@ -1,0 +1,30 @@
+---
+- name: Vérifier que le périmètre est exploitable
+  ansible.builtin.assert:
+    that:
+      - centreon_hosts_api_password | length > 0
+      - _centreon_hosts_target_hosts | length > 0
+    fail_msg: >-
+      Rien à déclarer. Le groupe d'inventaire « {{ centreon_hosts_monitored_group }} »
+      est vide, ou le mot de passe de l'API n'a pas été fourni.
+    quiet: true
+
+- name: Ouvrir une session sur l'API
+  ansible.builtin.include_tasks: authenticate.yml
+
+# Les objets de supervision doivent exister avant les hôtes qui s'y réfèrent.
+- name: Créer les objets de supervision propres au projet
+  ansible.builtin.include_tasks: objets_supervision.yml
+
+- name: Déclarer les groupes d'hôtes
+  ansible.builtin.include_tasks: hostgroups.yml
+
+- name: Déclarer les hôtes
+  ansible.builtin.include_tasks: hosts.yml
+
+- name: Poser les macros d'authentification SNMP
+  ansible.builtin.include_tasks: macros.yml
+
+- name: Exporter la configuration vers le collecteur
+  when: centreon_hosts_apply_configuration | bool
+  ansible.builtin.include_tasks: apply.yml

@@ -1,0 +1,389 @@
+---
+# Création des objets de supervision propres au projet.
+#
+# Le modèle OS-Linux-SNMP-custom appartient aux Plugin Packs de Centreon,
+# réservés à l'édition commerciale : sur une plateforme open source, il
+# n'existe pas et aucun dépôt ne le fournit. S'appuyer dessus rendait ce rôle
+# inutilisable là où il est le plus attendu.
+#
+# Le rôle crée donc ses propres objets à partir du plugin Perl, qui lui est
+# librement disponible : une commande de contrôle, un modèle d'hôte, et les
+# modèles de service correspondant aux contrôles essentiels. Ils portent un
+# préfixe distinct pour ne jamais entrer en conflit avec un pack officiel qui
+# serait installé plus tard.
+
+- name: Relever les commandes déjà déclarées
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: show
+      object: CMD
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  register: _centreon_hosts_commandes
+  changed_when: false
+
+- name: Créer la commande de contrôle SNMP
+  when: >-
+    centreon_hosts_command_name not in
+    (_centreon_hosts_commandes.json.result | default([]) | map(attribute='name', default='') | select | list)
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: add
+      object: CMD
+      values: >-
+        {{ centreon_hosts_command_name }};check;{{ centreon_hosts_command_line }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  changed_when: true
+
+- name: Créer la commande de vérification d'hôte
+  when: >-
+    centreon_hosts_host_command_name not in
+    (_centreon_hosts_commandes.json.result | default([]) | map(attribute='name', default='') | select | list)
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: add
+      object: CMD
+      values: >-
+        {{ centreon_hosts_host_command_name }};check;{{ centreon_hosts_host_command_line }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  changed_when: true
+
+# La ligne de commande peut évoluer alors que la commande existe déjà : sans
+# cette mise à jour, une correction n'atteindrait jamais une plateforme
+# déployée, et la configuration continuerait de citer une macro absente.
+- name: Aligner la ligne de la commande de contrôle
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: CMD
+      values: "{{ centreon_hosts_command_name }};line;{{ centreon_hosts_command_line }}"
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  changed_when: true
+
+- name: Relever les modèles d'hôtes déjà déclarés
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: show
+      object: HTPL
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  register: _centreon_hosts_modeles
+  changed_when: false
+
+- name: Créer le modèle d'hôte
+  when: >-
+    centreon_hosts_default_host_template not in
+    (_centreon_hosts_modeles.json.result | default([]) | map(attribute='name', default='') | select | list)
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: add
+      object: HTPL
+      values: >-
+        {{ centreon_hosts_default_host_template }};Hôte Linux supervisé en SNMP;;;;
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  register: _centreon_hosts_modele_cree
+  changed_when: true
+
+# Appliqué à chaque exécution, pour la même raison que les réglages des
+# modèles de services : conditionné à la création, il n'atteindrait jamais
+# une plateforme déjà déployée.
+- name: Rattacher la commande de vérification au modèle d'hôte
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: HTPL
+      values: >-
+        {{ centreon_hosts_default_host_template }};check_command;{{ centreon_hosts_host_command_name }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  changed_when: false
+
+# La période de contrôle est relevée sur la plateforme : 24x7 est la plus
+# courante mais n'est pas garantie, et un nom inexistant fait échouer la
+# création sans dire lequel manque.
+- name: Relever les périodes de temps disponibles
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: show
+      object: TP
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  register: _centreon_hosts_periodes
+  changed_when: false
+
+- name: Retenir la période de contrôle à employer
+  ansible.builtin.set_fact:
+    _centreon_hosts_periode: >-
+      {{ '24x7' if '24x7' in (_centreon_hosts_periodes.json.result | default([]) | map(attribute='name', default='') | select | list)
+         else (_centreon_hosts_periodes.json.result | default([]) | map(attribute='name', default='') | select | list | first | default('')) }}
+
+- name: Exiger qu'une période de contrôle existe
+  ansible.builtin.assert:
+    that:
+      - _centreon_hosts_periode | length > 0
+    fail_msg: >-
+      Aucune période de temps n'est déclarée sur la plateforme. Les modèles de
+      services ne peuvent pas être créés sans elle : en définir une dans
+      Centreon, sous Configuration puis Périodes de temps.
+    quiet: true
+
+- name: Relever les modèles de services déjà déclarés
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: show
+      object: STPL
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  register: _centreon_hosts_stpl
+  changed_when: false
+
+# Le moteur refuse certains caractères dans un nom d'objet. Une description
+# fautive ne se voit qu'à la génération, sous la forme d'une « erreur de
+# cohérence » sans détail : mieux vaut refuser ici, en nommant le service.
+- name: Refuser une description que le moteur n'accepterait pas
+  ansible.builtin.assert:
+    that:
+      - >-
+        (item.description | reject('in', _centreon_hosts_caracteres_interdits)
+         | list | length) == (item.description | length)
+    fail_msg: >-
+      La description « {{ item.description }} » du service {{ item.nom }}
+      contient un caractère refusé par le moteur de supervision
+      ({{ _centreon_hosts_caracteres_interdits }}). Tout service créé depuis
+      ce modèle rendrait la configuration ingénérable sur l'ensemble des
+      hôtes, sans que le message d'erreur le nomme.
+    quiet: true
+  loop: "{{ centreon_hosts_services }}"
+  loop_control:
+    label: "{{ item.nom }} : {{ item.description }}"
+
+- name: Créer les modèles de services
+  # Un modèle de service est identifié par « description » et non par
+  # « name » : CLAPI renvoie les colonnes de la table service en retirant
+  # leur préfixe, et le nom d'un service y est service_description.
+  when: >-
+    (centreon_hosts_service_prefix ~ item.nom) not in
+    (_centreon_hosts_stpl.json.result | default([]) | map(attribute='description', default='') | select | list)
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: add
+      object: STPL
+      # CLAPI attend trois champs pour un modèle de service : sa description,
+      # son alias, et le modèle dont il hérite. En omettre un fait répondre
+      # « Missing parameters », sans dire lequel manque.
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};{{ item.description }};{{ centreon_hosts_service_parent }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_services }}"
+  loop_control:
+    label: "{{ centreon_hosts_service_prefix }}{{ item.nom }}"
+  register: _centreon_hosts_stpl_crees
+  changed_when: true
+
+# Ces réglages suivent la création des modèles et ne peuvent pas être des
+# handlers : ils dépendent des données de la boucle qui vient de les créer,
+# et leur ordre compte.
+# Les réglages qui suivent sont appliqués à chaque exécution, et non
+# seulement à la création des modèles.
+#
+# Les conditionner à « la création vient d'avoir lieu » les rendait
+# inopérants sur une plateforme déjà déployée : les modèles existaient, la
+# période de contrôle n'était jamais posée, et la génération de la
+# configuration échouait sur une incohérence sans nommer la cause.
+#
+# Ils ne se déclarent pas modifiants : l'interface de programmation ne dit
+# pas si une écriture a réellement changé quelque chose, et l'affirmer
+# fausserait le rapport à chaque passage.
+
+- name: Régler la commande de chaque modèle de service
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};check_command;{{ centreon_hosts_command_name }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_services }}"
+  loop_control:
+    label: "{{ item.nom }}"
+  changed_when: false
+
+- name: Poser les réglages de chaque modèle de service
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.0.nom }};{{ item.1.cle }};{{ item.1.valeur }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_services | product(centreon_hosts_service_settings) | list }}"
+  loop_control:
+    label: "{{ item.0.nom }} / {{ item.1.cle }}"
+  changed_when: false
+
+- name: Poser la période de contrôle de chaque modèle de service
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};check_period;{{ _centreon_hosts_periode }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_services }}"
+  loop_control:
+    label: "{{ item.nom }}"
+  changed_when: false
+
+- name: Poser le mode du plugin sur chaque modèle de service
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setmacro
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};MODE;{{ item.mode }};0;Mode du plugin Linux SNMP
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_services }}"
+  loop_control:
+    label: "{{ item.nom }} -> {{ item.mode }}"
+  changed_when: false
+
+# Un rattachement déjà en place fait répondre 409 « Object already exists ».
+# Ce n'est pas une erreur mais l'état recherché : la réponse est donc
+# acceptée, tandis que tout autre code reste un échec.
+- name: Rattacher les modèles de services au modèle d'hôte
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: addhosttemplate
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};{{ centreon_hosts_default_host_template }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+    status_code: [200, 409]
+  loop: "{{ centreon_hosts_services }}"
+  loop_control:
+    label: "{{ item.nom }}"
+  register: _centreon_hosts_rattachement
+  changed_when: false
+  failed_when: >-
+    _centreon_hosts_rattachement.status not in [200, 409]
+
+# Changer la description d'un modèle ne touche pas aux services déjà créés sur
+# les hôtes : ils gardent leur ancien nom, et si celui-ci porte un caractère
+# refusé, la configuration reste ingénérable. Ils sont donc renommés, ce qui
+# préserve leur historique là où une suppression le perdrait.
+- name: Relever les services attachés aux hôtes
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: show
+      object: SERVICE
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  register: _centreon_hosts_services_existants
+  changed_when: false
+
+- name: Établir les services portant une description abandonnée
+  ansible.builtin.set_fact:
+    _centreon_hosts_renommages: >-
+      {{ _centreon_hosts_renommages | default([]) + [{
+           'hote': item.0['host name'],
+           'ancienne': item.0.description,
+           'nouvelle': item.1.description
+         }] }}
+  loop: >-
+    {{ (_centreon_hosts_services_existants.json.result | default([]))
+       | product(centreon_hosts_services) | list }}
+  when: item.0.description in (item.1.anciennes_descriptions | default([]))
+  loop_control:
+    label: "{{ item.0['host name'] | default('?') }} : {{ item.0.description | default('?') }}"
+
+- name: Renommer ces services vers la description en vigueur
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: SERVICE
+      values: >-
+        {{ item.hote }};{{ item.ancienne }};description;{{ item.nouvelle }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ _centreon_hosts_renommages | default([]) }}"
+  loop_control:
+    label: "{{ item.hote }} : {{ item.ancienne }} -> {{ item.nouvelle }}"
+  changed_when: true

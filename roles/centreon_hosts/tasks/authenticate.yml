@@ -1,0 +1,29 @@
+---
+- name: Obtenir un jeton d'authentification
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=authenticate"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: "{{ centreon_hosts_api_user }}"
+      password: "{{ centreon_hosts_api_password }}"
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+    status_code: [200]
+  register: _centreon_hosts_auth
+  no_log: true
+  retries: 6
+  delay: 10
+  until: _centreon_hosts_auth is succeeded and _centreon_hosts_auth.json.authToken is defined
+
+- name: Conserver le jeton pour les appels suivants
+  ansible.builtin.set_fact:
+    _centreon_hosts_token: "{{ _centreon_hosts_auth.json.authToken }}"
+  no_log: true
+
+- name: Préparer les en-têtes de l'API
+  ansible.builtin.set_fact:
+    _centreon_hosts_headers:
+      centreon-auth-token: "{{ _centreon_hosts_token }}"
+      Content-Type: application/json
+  no_log: true

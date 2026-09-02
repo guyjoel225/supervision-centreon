@@ -1,0 +1,150 @@
+---
+# ===================================================================
+# Interface publique du rôle.
+#
+# Chaque variable est préfixée par le nom du rôle, comme l'exige la
+# convention Ansible. Les valeurs par défaut reprennent, quand elles
+# existent, les variables neutres définies dans l'inventaire : cela évite
+# de répéter la même information sous deux noms différents dans
+# group_vars, tout en gardant chaque rôle réutilisable isolément.
+# ===================================================================
+# ===================================================================
+# Accès à l'API de configuration
+# ===================================================================
+# Centreon expose deux interfaces de programmation. Celle utilisée ici est
+# l'API v1, qui donne accès aux commandes CLAPI : c'est la seule qui couvre
+# aujourd'hui l'intégralité de la configuration (hôtes, macros, export).
+centreon_hosts_api_protocol: "{{ centreon_web_protocol | default('http') }}"
+centreon_hosts_api_host: "{{ ansible_host | default(inventory_hostname) }}"
+centreon_hosts_api_port: "{{ centreon_web_port | default(80) }}"
+centreon_hosts_api_url: "{{ centreon_hosts_api_protocol }}://{{ centreon_hosts_api_host }}:{{ centreon_hosts_api_port }}/centreon/api/index.php"
+centreon_hosts_api_user: "{{ centreon_web_admin_login | default('admin') }}"
+centreon_hosts_api_password: "{{ centreon_web_admin_password }}"
+centreon_hosts_api_timeout: 60
+
+# Interface de programmation de deuxième génération, employée pour le
+# déploiement de la configuration : l'action « applycfg » de CLAPI a été
+# retirée et l'objet POLLER n'existe plus.
+centreon_hosts_api_v2_url: >-
+  {{ centreon_hosts_api_protocol }}://{{ centreon_hosts_api_host }}:{{ centreon_hosts_api_port }}/centreon/api/latest
+
+# ===================================================================
+# Périmètre déclaré
+# ===================================================================
+# Groupe d'inventaire dont les membres deviennent des hôtes supervisés.
+centreon_hosts_monitored_group: monitored
+
+# Collecteur qui portera les hôtes. Sur une plateforme mono-serveur, c'est le
+# central lui-même, nommé « Central » par l'installation.
+centreon_hosts_poller_name: "{{ centreon_poller_name | default('Central') }}"
+
+# Modèle d'hôte appliqué aux machines supervisées.
+#
+# Ce n'est pas OS-Linux-SNMP-custom : ce modèle appartient aux Plugin Packs de
+# Centreon, réservés à l'édition commerciale, et n'existe donc pas sur une
+# plateforme open source. Le rôle crée son propre modèle à partir du plugin
+# Perl, qui lui est librement disponible. Le préfixe évite tout conflit avec
+# un pack officiel qui serait installé plus tard.
+centreon_hosts_default_host_template: >-
+  {{ centreon_default_host_template | default('SUP-Linux-SNMP') }}
+
+# Commande de contrôle créée par le rôle, et sa ligne de commande.
+# La macro MODE est portée par chaque modèle de service ; SNMPEXTRAOPTIONS
+# porte les paramètres d'authentification, différents en v2c et en v3.
+centreon_hosts_command_name: check_sup_linux_snmp
+
+# Commande qui établit si l'hôte répond, avant tout contrôle de service.
+#
+# Elle est créée par le rôle et non empruntée à Centreon : les commandes
+# livrées par défaut varient d'une installation à l'autre, et supposer
+# check_centreon_ping présente fait échouer la déclaration là où elle ne
+# l'est pas. check_icmp vient des plugins Nagios, installés avec Centreon.
+centreon_hosts_host_command_name: check_sup_host_alive
+centreon_hosts_host_command_line: >-
+  $USER1$/check_icmp -H $HOSTADDRESS$ -w 3000.0,80% -c 5000.0,100% -p 5
+# Toutes les macros citées ici doivent exister sur les hôtes : Centreon
+# refuse de générer une configuration qui en référence une inconnue, avec un
+# message parlant d'une « erreur de cohérence » sans nommer la macro.
+#
+# Les paramètres d'authentification sont regroupés dans SNMPEXTRAOPTIONS, que
+# le rôle pose selon la version employée : la v2c n'a qu'une communauté, la v3
+# cinq paramètres. Une seule macro évite d'avoir à citer les deux jeux dans la
+# même commande, dont l'un serait toujours vide.
+centreon_hosts_command_line: >-
+  $CENTREONPLUGINS$/centreon_linux_snmp.pl
+  --plugin=os::linux::snmp::plugin
+  --mode=$_SERVICEMODE$
+  --hostname=$HOSTADDRESS$
+  --snmp-version=$_HOSTSNMPVERSION$
+  $_HOSTSNMPEXTRAOPTIONS$
+
+# Préfixe des modèles de services créés par le rôle.
+centreon_hosts_service_prefix: "SUP-Linux-"
+
+# Modèle de service dont héritent ceux créés par le rôle.
+#
+# Vide par défaut : les modèles livrés varient d'une installation à l'autre,
+# et generic-service n'existe pas partout. CLAPI accepte un modèle sans
+# parent, à condition de lui poser ses propres réglages, ce que fait le rôle
+# juste après la création. Renseigner cette variable si la plateforme dispose
+# d'un modèle maison dont les nouveaux services doivent hériter.
+centreon_hosts_service_parent: ""
+
+# Réglages posés sur chaque modèle de service créé, faute d'héritage.
+# L'intervalle est exprimé en périodes de 60 secondes, comme le veut Centreon.
+centreon_hosts_service_settings:
+  - {cle: max_check_attempts, valeur: "3"}
+  - {cle: normal_check_interval, valeur: "5"}
+  - {cle: retry_check_interval, valeur: "1"}
+  - {cle: active_checks_enabled, valeur: "1"}
+  - {cle: passive_checks_enabled, valeur: "0"}
+
+# Contrôles posés sur chaque hôte supervisé. Le mode correspond à celui du
+# plugin Linux SNMP. En ajouter revient à ajouter une ligne ici.
+centreon_hosts_services:
+  - {nom: Cpu, mode: cpu, description: "Charge processeur"}
+  - {nom: Memory, mode: memory, description: "Mémoire utilisée"}
+  # « anciennes_descriptions » retient les noms abandonnés, pour que le rôle
+  # sache renommer les services déjà créés sous ces noms plutôt que d'en
+  # laisser des doublons. Champ facultatif, ajouté sans rien retirer.
+  - {nom: Swap, mode: swap, description: "Espace de pagination",
+     anciennes_descriptions: ["Espace d'échange"]}
+  - {nom: Load, mode: load, description: "Charge système"}
+  - {nom: Storage, mode: storage, description: "Occupation des systèmes de fichiers"}
+  - {nom: Uptime, mode: uptime, description: "Temps depuis le démarrage"}
+
+# ===================================================================
+# Macros SNMP v3 posées sur chaque hôte
+# ===================================================================
+# Version déclarée sur les hôtes dans Centreon. Suit ce qui est réellement
+# activé sur les agents : inutile de déclarer de la v3 côté central si les
+# agents n'écoutent qu'en v2c, l'hôte remonterait en erreur.
+centreon_hosts_snmp_version: "{{ '3' if snmp_agent_enable_v3 | default(true) else '2c' }}"
+
+# Communauté posée sur les hôtes quand la v2c est la version retenue.
+centreon_hosts_snmp_community: "{{ snmp_agent_v2c_community | default('') }}"
+centreon_hosts_snmp_v3_user: "{{ snmp_agent_v3_user }}"
+centreon_hosts_snmp_v3_auth_protocol: "{{ snmp_agent_v3_auth_protocol }}"
+centreon_hosts_snmp_v3_priv_protocol: "{{ snmp_agent_v3_priv_protocol }}"
+centreon_hosts_snmp_v3_auth_passphrase: "{{ snmp_agent_v3_auth_passphrase }}"
+centreon_hosts_snmp_v3_priv_passphrase: "{{ snmp_agent_v3_priv_passphrase }}"
+
+# Les passphrases ne sont posées qu'à la création de l'hôte : Centreon les
+# renvoie masquées, il est donc impossible de savoir si elles ont changé.
+# Passer cette variable à true pour les réécrire, typiquement après une
+# rotation des secrets SNMP.
+centreon_hosts_force_update_snmp_macros: false
+
+# ===================================================================
+# Application de la configuration
+# ===================================================================
+# Génère les fichiers du moteur et les recharge. Sans cette étape, les hôtes
+# existent en base mais ne sont pas réellement supervisés.
+centreon_hosts_apply_configuration: true
+
+# Recharge le collecteur même si rien n'a changé.
+# Laissé à false : recharger fait redémarrer le moteur de supervision, donc
+# interrompt brièvement la collecte de tout le parc porté par ce collecteur.
+# Sur un central en service, cette coupure ne doit pas survenir à chaque
+# passage du playbook mais uniquement quand la configuration a bougé.
+centreon_hosts_force_apply: false

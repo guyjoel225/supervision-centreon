@@ -1,0 +1,42 @@
+---
+# Hôtes à déclarer, tirés de l'inventaire.
+_centreon_hosts_target_hosts: "{{ groups[centreon_hosts_monitored_group] | default([]) | sort }}"
+
+# Union de tous les groupes d'hôtes cités dans l'inventaire, sans doublon.
+_centreon_hosts_required_hostgroups: >-
+  {{ _centreon_hosts_target_hosts
+     | map('extract', hostvars, 'centreon_host_groups')
+     | select('defined')
+     | flatten
+     | unique
+     | sort }}
+
+# Macros non sensibles, comparables d'un passage à l'autre.
+_centreon_hosts_public_macros:
+  SNMP_V3_USERNAME: "{{ centreon_hosts_snmp_v3_user }}"
+  SNMP_V3_AUTH_PROTOCOL: "{{ centreon_hosts_snmp_v3_auth_protocol }}"
+  SNMP_V3_PRIV_PROTOCOL: "{{ centreon_hosts_snmp_v3_priv_protocol }}"
+
+# Macros sensibles, que Centreon renvoie masquées.
+_centreon_hosts_secret_macros:
+  SNMP_V3_AUTH_PASSPHRASE: "{{ centreon_hosts_snmp_v3_auth_passphrase }}"
+  SNMP_V3_PRIV_PASSPHRASE: "{{ centreon_hosts_snmp_v3_priv_passphrase }}"
+
+# Paramètres passés au plugin, selon la version SNMP réellement activée sur
+# les agents. En v2c, seule la communauté ; en v3, l'utilisateur et les deux
+# couples protocole et phrase secrète.
+_centreon_hosts_extra_options: >-
+  {{ '--snmp-community=' ~ centreon_hosts_snmp_community
+     if centreon_hosts_snmp_version == '2c'
+     else '--snmp-username=' ~ centreon_hosts_snmp_v3_user
+          ~ ' --authprotocol=' ~ centreon_hosts_snmp_v3_auth_protocol
+          ~ ' --authpassphrase=' ~ centreon_hosts_snmp_v3_auth_passphrase
+          ~ ' --privprotocol=' ~ centreon_hosts_snmp_v3_priv_protocol
+          ~ ' --privpassphrase=' ~ centreon_hosts_snmp_v3_priv_passphrase }}
+
+# Caractères que le moteur refuse dans un nom d'objet, relevés dans la
+# directive illegal_object_name_chars de centengine.cfg. Un seul d'entre eux
+# dans la description d'un service rend toute la configuration ingénérable,
+# et l'interface de programmation ne le dit pas : elle répond « erreur de
+# cohérence », parfois avec un message vide.
+_centreon_hosts_caracteres_interdits: '~!$%^&*"|''<>?,()='

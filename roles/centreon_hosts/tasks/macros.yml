@@ -1,0 +1,115 @@
+---
+# La macro SNMPEXTRAOPTIONS porte les paramètres d'authentification du
+# plugin. Elle est posée sur tous les hôtes, quelle que soit la version :
+# la commande la cite toujours, et Centreon refuse de générer sa
+# configuration si une macro citée n'existe pas.
+- name: Poser les paramètres d'authentification du plugin
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setmacro
+      object: HOST
+      values: "{{ item }};SNMPEXTRAOPTIONS;{{ _centreon_hosts_extra_options }};1;Paramètres d'authentification SNMP"
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ _centreon_hosts_target_hosts }}"
+  no_log: true
+  changed_when: >-
+    item in _centreon_hosts_new_hosts
+    or centreon_hosts_force_update_snmp_macros | bool
+
+# Les macros non sensibles sont relues avant d'être écrites, pour que le
+# playbook ne se déclare pas modifiant à chaque passage.
+- name: Relever les macros déjà posées sur chaque hôte
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: getmacro
+      object: HOST
+      values: "{{ item }}"
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ _centreon_hosts_target_hosts }}"
+  register: _centreon_hosts_macros_current
+  changed_when: false
+
+- name: Construire la table des macros par hôte
+  ansible.builtin.set_fact:
+    _centreon_hosts_macro_map: >-
+      {{ _centreon_hosts_macro_map | default({}) | combine({
+           item.item: (item.json.result | default([]))
+                      | items2dict(key_name='macro name', value_name='macro value')
+         }) }}
+  loop: "{{ _centreon_hosts_macros_current.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Poser les macros SNMP v3 non sensibles
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setmacro
+      object: HOST
+      values: "{{ item.0 }};{{ item.1.key }};{{ item.1.value }};0;Posé par Ansible"
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ _centreon_hosts_target_hosts | product(_centreon_hosts_public_macros | dict2items) | list }}"
+  loop_control:
+    label: "{{ item.0 }} / {{ item.1.key }}"
+  when: >-
+    _centreon_hosts_macro_map[item.0] | default({}) | dict2items
+    | selectattr('key', 'equalto', item.1.key)
+    | selectattr('value', 'equalto', item.1.value)
+    | list | length == 0
+  register: _centreon_hosts_public_macros_set
+  changed_when: true
+
+# Les passphrases sont marquées comme mots de passe côté Centreon, qui les
+# renvoie masquées : impossible de comparer l'existant. Elles ne sont donc
+# écrites qu'à la création de l'hôte, ou sur demande explicite lors d'une
+# rotation des secrets.
+- name: Poser les passphrases SNMP v3
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setmacro
+      object: HOST
+      values: "{{ item.0 }};{{ item.1.key }};{{ item.1.value }};1;Posé par Ansible"
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ _centreon_hosts_target_hosts | product(_centreon_hosts_secret_macros | dict2items) | list }}"
+  loop_control:
+    label: "{{ item.0 }} / {{ item.1.key }}"
+  when: >-
+    item.0 in _centreon_hosts_new_hosts
+    or centreon_hosts_force_update_snmp_macros | bool
+  no_log: true
+  register: _centreon_hosts_secret_macros_set
+  changed_when: true
+
+- name: Appliquer le modèle d'hôte aux hôtes nouvellement créés
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: applytpl
+      object: HOST
+      values: "{{ item }}"
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ _centreon_hosts_new_hosts }}"
+  changed_when: true

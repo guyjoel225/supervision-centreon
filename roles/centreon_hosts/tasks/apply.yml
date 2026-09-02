@@ -1,0 +1,79 @@
+---
+# Générer la configuration et la recharger fait redémarrer le moteur de
+# supervision du collecteur. Sur un central en service, c'est une coupure de
+# collecte : elle ne doit donc survenir que si la configuration a réellement
+# changé, jamais à chaque passage du playbook.
+#
+# C'était le défaut le plus grave de ce rôle : sans cette garde, superviser
+# un parc stable revenait à interrompre la collecte à chaque exécution.
+
+- name: Déterminer si la configuration a réellement changé
+  ansible.builtin.set_fact:
+    _centreon_hosts_config_changed: >-
+      {{ (_centreon_hosts_new_hosts | default([]) | length > 0)
+         or (_centreon_hosts_hg_created is defined and _centreon_hosts_hg_created is changed)
+         or (_centreon_hosts_public_macros_set is defined and _centreon_hosts_public_macros_set is changed)
+         or (_centreon_hosts_secret_macros_set is defined and _centreon_hosts_secret_macros_set is changed) }}
+
+- name: Expliquer pourquoi le collecteur n'est pas rechargé
+  when: not (_centreon_hosts_config_changed | bool or centreon_hosts_force_apply | bool)
+  ansible.builtin.debug:
+    msg: >-
+      Aucun hôte, groupe ni macro n'a changé : la configuration du collecteur
+      « {{ centreon_hosts_poller_name }} » n'est pas régénérée et le moteur de
+      supervision n'est pas rechargé. Forcer avec centreon_hosts_force_apply=true.
+
+# Le déploiement ne passe plus par CLAPI : l'action « applycfg » a été
+# retirée, et l'objet POLLER n'existe plus. Il se fait par l'interface de
+# programmation de deuxième génération, qui a sa propre authentification et
+# répond à une requête GET.
+- name: Ouvrir une session sur l'interface de programmation v2
+  when: _centreon_hosts_config_changed | bool or centreon_hosts_force_apply | bool
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_v2_url }}/login"
+    method: POST
+    body_format: json
+    body:
+      security:
+        credentials:
+          login: "{{ centreon_hosts_api_user }}"
+          password: "{{ centreon_hosts_api_password }}"
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  register: _centreon_hosts_session_v2
+  no_log: true
+  changed_when: false
+
+- name: Générer et recharger la configuration du collecteur
+  when: _centreon_hosts_config_changed | bool or centreon_hosts_force_apply | bool
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_v2_url }}/configuration/monitoring-servers/generate-and-reload"
+    method: GET
+    headers:
+      X-AUTH-TOKEN: "{{ _centreon_hosts_session_v2.json.security.token }}"
+    status_code: [200, 204]
+    return_content: true
+    timeout: 600
+  register: _centreon_hosts_applycfg
+  changed_when: true
+  failed_when: _centreon_hosts_applycfg.status not in [200, 204]
+
+# L'export régénère la configuration du moteur et le recharge. Sur une
+# plateforme neuve, c'est ce qui lui donne enfin quelque chose à superviser :
+# avant cet export, centengine refuse de démarrer faute de configuration.
+- name: Démarrer le moteur de supervision après le premier export
+  when: _centreon_hosts_config_changed | bool or centreon_hosts_force_apply | bool
+  ansible.builtin.service:
+    name: centengine
+    state: started
+    enabled: true
+  register: _centreon_hosts_moteur
+
+- name: Confirmer que le moteur supervise réellement
+  when: _centreon_hosts_moteur is not skipped
+  ansible.builtin.systemd_service:
+    name: centengine
+  register: _centreon_hosts_moteur_etat
+  changed_when: false
+  failed_when: >-
+    (_centreon_hosts_moteur_etat.status | default({})).get('ActiveState', '') != 'active'

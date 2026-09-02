@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: centreon_hosts
+  author: Joel Konan
+  description: >-
+    Déclare dans Centreon les groupes d'hôtes, les hôtes de l'inventaire et
+    leurs macros SNMP v3, puis exporte la configuration vers le collecteur.
+  license: MIT
+  min_ansible_version: "2.15"
+dependencies: []
