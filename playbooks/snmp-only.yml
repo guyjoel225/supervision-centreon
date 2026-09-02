@@ -1,0 +1,50 @@
+---
+# ===================================================================
+# Configure les agents selon ce que déclare l'inventaire.
+#
+# Trois points d'entrée existent pour les agents, et ils ne se
+# remplacent pas :
+#   - snmp-v3.yml   force la v3, quelle que soit l'inventaire
+#   - snmp-v2c.yml  force la v2c, quelle que soit l'inventaire
+#   - celui-ci      suit l'inventaire, donc le seul qui permet
+#                   d'activer les deux versions à la fois, ce qui est
+#                   nécessaire pour migrer de la v2c vers la v3 sans
+#                   trou de supervision
+#
+# Point d'entrée pour un serveur central Centreon DÉJÀ EN SERVICE.
+#
+# Rien n'est installé ni modifié sur le central : ce playbook ne touche
+# qu'aux hôtes à superviser, et n'y pose que l'agent SNMP. Aucun paquet
+# Centreon n'est déposé sur eux.
+#
+# Ce qu'il ne fait volontairement PAS, contrairement à site.yml :
+#   - il n'installe pas de serveur central
+#   - il ne change pas le fuseau horaire des machines
+#   - il ne remplace pas leur synchronisation de l'heure
+#   - il ne modifie pas leur /etc/hosts
+#   - il ne déclare pas les hôtes dans Centreon
+#
+# Ces quatre dernières opérations relèvent du rôle common et du rôle
+# centreon_hosts, qui ne sont pas joués ici. C'est ce qui rend ce point
+# d'entrée acceptable sur des serveurs en production.
+#
+# Avant de l'exécuter, vérifier deux choses dans group_vars :
+#   1. centreon_central_address pointe sur l'adresse RÉELLE du central
+#      existant. C'est elle qui autorise l'interrogation et ouvre le
+#      pare-feu ; une valeur erronée donne des agents qui tournent et un
+#      central qui ne reçoit rien.
+#   2. les passphrases SNMP v3 du coffre sont celles que le central
+#      utilise déjà. Ce sont ses macros qui font foi, pas le coffre.
+#
+# Usage :
+#   ansible-playbook playbooks/snmp-only.yml -K --ask-vault-pass
+#
+# Les hôtes seront ensuite à déclarer dans l'interface Centreon, ou par
+# playbooks/40-centreon-hosts.yml si le central est accessible en SSH.
+# ===================================================================
+
+- name: Importer la configuration des agents SNMP
+  ansible.builtin.import_playbook: 30-snmp-agents.yml
+
+- name: Importer la vérification de la collecte, sans central
+  ansible.builtin.import_playbook: 98-verify-snmp-agents.yml

@@ -1,0 +1,36 @@
+---
+# ===================================================================
+# Installer et configurer les agents en SNMP v3, authentifié et chiffré.
+#
+# C'est la version à privilégier : elle authentifie le gestionnaire et
+# chiffre les échanges. Les versions 1 et 2c ne font ni l'un ni l'autre.
+#
+# Ce playbook force la v3 et désactive la v2c, quelle que soit la
+# configuration de l'inventaire. Il ne touche ni au serveur central, ni
+# au fuseau horaire, ni à la synchronisation de l'heure, ni à
+# /etc/hosts : il est utilisable sur des serveurs en production.
+#
+# Prérequis dans le coffre :
+#   vault_snmp_agent_v3_auth_passphrase   8 caractères au moins
+#   vault_snmp_agent_v3_priv_passphrase   8 caractères au moins
+#
+# Et dans group_vars, centreon_central_address doit porter l'adresse du
+# serveur central qui interrogera les agents : c'est elle qui autorise
+# l'interrogation et ouvre le pare-feu.
+#
+# Usage :
+#   ansible-playbook playbooks/snmp-v3.yml -K --ask-vault-pass
+#   ansible-playbook playbooks/snmp-v3.yml --limit op-serv-ub01 -K --ask-vault-pass
+# ===================================================================
+
+- name: Configurer les agents en SNMP v3
+  ansible.builtin.import_playbook: 30-snmp-agents.yml
+  vars:
+    snmp_agent_enable_v3: true
+    snmp_agent_enable_v2c: false
+
+- name: Vérifier la collecte en SNMP v3
+  ansible.builtin.import_playbook: 98-verify-snmp-agents.yml
+  vars:
+    snmp_agent_enable_v3: true
+    snmp_agent_enable_v2c: false

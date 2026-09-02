@@ -1,0 +1,22 @@
+---
+# Déploiement de tout ce qui ne dépend pas du serveur central.
+#
+# Ce point d'entrée existe parce que le central Centreon exige un système
+# d'exploitation qui n'est pas toujours disponible tout de suite, alors que
+# les agents SNMP, eux, ne dépendent de rien. Il permet de valider les deux
+# tiers de la chaîne sans attendre.
+#
+# Usage :
+#   ansible-playbook playbooks/site-agents.yml -K --ask-vault-pass
+#
+# Une fois le central en service, c'est site.yml qui prend le relais et qui
+# reste le point d'entrée de référence.
+
+- name: Importer les prérequis système
+  ansible.builtin.import_playbook: 10-common.yml
+
+- name: Importer la configuration des agents SNMP
+  ansible.builtin.import_playbook: 30-snmp-agents.yml
+
+- name: Importer la vérification des agents, sans central
+  ansible.builtin.import_playbook: 98-verify-snmp-agents.yml

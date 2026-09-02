@@ -1,0 +1,20 @@
+---
+# Passe après l'installation du central : le paquet Centreon tire net-snmp sur
+# le serveur central, et ce rôle doit avoir le dernier mot sur
+# /etc/snmp/snmpd.conf.
+#
+# Le déploiement se fait par vagues et non sur tout le parc à la fois. La
+# première vague ne traite qu'une seule machine, qui sert de témoin : si le
+# rôle a une régression, elle est constatée sur un hôte et non sur cent. Les
+# vagues suivantes traitent le parc par quarts.
+#
+# Un laboratoire n'a pas besoin de cette prudence et surcharge la valeur dans
+# son inventaire (voir inventories/lab/group_vars/monitored.yml).
+- name: Configurer les agents SNMP v3 sur les hôtes supervisés
+  hosts: monitored
+  gather_facts: true
+  serial: "{{ snmp_agent_serial | default([1, '25%']) }}"
+  max_fail_percentage: "{{ snmp_agent_max_fail_percentage | default(0) }}"
+  roles:
+    - role: snmp_agent
+      tags: [snmp]

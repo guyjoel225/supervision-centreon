@@ -1,0 +1,42 @@
+---
+# ===================================================================
+# Installer et configurer les agents en SNMP v2c.
+#
+# À n'utiliser que si le serveur central en place ne sait pas interroger
+# en v3. La communauté circule alors EN CLAIR sur le réseau, sans
+# authentification ni chiffrement : quiconque écoute le lien la capture,
+# et peut ensuite lire toute la vue exposée par les agents.
+#
+# La seule protection réelle est double : la communauté n'est acceptée
+# que depuis les adresses déclarées, et le pare-feu n'ouvre le port que
+# pour elles. Le rôle refuse par ailleurs les communautés « public »,
+# « private » et « community », ainsi que toute valeur de moins de huit
+# caractères.
+#
+# Ce playbook force la v2c et désactive la v3, quelle que soit la
+# configuration de l'inventaire. Il ne touche ni au serveur central, ni
+# au fuseau horaire, ni à la synchronisation de l'heure, ni à
+# /etc/hosts : il est utilisable sur des serveurs en production.
+#
+# Prérequis dans le coffre :
+#   vault_snmp_agent_v2c_community   la communauté que le central utilise
+#
+# Pour migrer vers la v3 sans trou de supervision, ne pas utiliser ce
+# playbook mais activer les deux versions à la fois dans l'inventaire,
+# puis lancer snmp-only.yml. Voir docs/exploitation.md.
+#
+# Usage :
+#   ansible-playbook playbooks/snmp-v2c.yml -K --ask-vault-pass
+# ===================================================================
+
+- name: Configurer les agents en SNMP v2c
+  ansible.builtin.import_playbook: 30-snmp-agents.yml
+  vars:
+    snmp_agent_enable_v3: false
+    snmp_agent_enable_v2c: true
+
+- name: Vérifier la collecte en SNMP v2c
+  ansible.builtin.import_playbook: 98-verify-snmp-agents.yml
+  vars:
+    snmp_agent_enable_v3: false
+    snmp_agent_enable_v2c: true

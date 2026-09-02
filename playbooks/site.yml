@@ -1,0 +1,28 @@
+---
+# Déploiement complet de la plateforme de supervision, dans l'ordre de
+# cohérence : ce qui est prérequis d'abord, ce qui le consomme ensuite.
+#
+#   1. prérequis système partout
+#   2. serveur central Centreon
+#   3. agents SNMP, y compris sur le central lui-même
+#   4. déclaration des hôtes dans Centreon
+#   5. vérification de bout en bout
+#
+# Usage :
+#   ansible-playbook playbooks/site.yml
+#   ansible-playbook playbooks/site.yml --limit monitored --tags snmp
+
+- name: Importer les prérequis système
+  ansible.builtin.import_playbook: 10-common.yml
+
+- name: Importer l'installation du serveur central
+  ansible.builtin.import_playbook: 20-central.yml
+
+- name: Importer la configuration des agents SNMP
+  ansible.builtin.import_playbook: 30-snmp-agents.yml
+
+- name: Importer la déclaration des hôtes dans Centreon
+  ansible.builtin.import_playbook: 40-centreon-hosts.yml
+
+- name: Importer la vérification de bout en bout
+  ansible.builtin.import_playbook: 99-verify.yml

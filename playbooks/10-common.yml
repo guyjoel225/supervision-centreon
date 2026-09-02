@@ -1,0 +1,7 @@
+---
+- name: Appliquer les prérequis système à tout le parc
+  hosts: all
+  gather_facts: true
+  roles:
+    - role: common
+      tags: [common]

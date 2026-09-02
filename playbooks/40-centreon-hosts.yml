@@ -1,0 +1,9 @@
+---
+# Les tâches s'exécutent sur le central, mais bouclent sur les hôtes de
+# l'inventaire : la configuration Centreon est centralisée par nature.
+- name: Déclarer les hôtes supervisés dans Centreon
+  hosts: centreon_central
+  gather_facts: true
+  roles:
+    - role: centreon_hosts
+      tags: [declaration]

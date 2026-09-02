@@ -1,0 +1,7 @@
+---
+- name: Installer le serveur central Centreon
+  hosts: centreon_central
+  gather_facts: true
+  roles:
+    - role: centreon_central
+      tags: [central]
