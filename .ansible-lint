@@ -1,0 +1,13 @@
+---
+profile: production
+
+exclude_paths:
+  - collections/
+  - .github/
+
+skip_list:
+  # Les noms de rôles contiennent des underscores, ce qui est la convention retenue ici.
+  - role-name
+
+warn_list:
+  - experimental

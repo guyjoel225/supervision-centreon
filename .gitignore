@@ -1,0 +1,22 @@
+# Secrets : rien de tout cela ne doit entrer dans l'historique git
+.vault_pass
+*.vault_pass
+vault.yml.clear
+*.key
+*.pem
+*.p12
+id_rsa*
+.env
+
+# Artefacts d'exécution
+*.retry
+*.log
+.facts_cache/
+collections/
+__pycache__/
+*.pyc
+
+# Éditeurs
+.idea/
+.vscode/
+*.swp

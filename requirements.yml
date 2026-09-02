@@ -1,0 +1,11 @@
+---
+# Collections nécessaires au projet.
+# Installation : ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: ansible.posix
+    version: ">=1.5.4"
+  - name: community.general
+    version: ">=8.0.0"
+  # La collection MySQL a été reversée dans l'espace de noms ansible.
+  - name: ansible.mysql
+    version: ">=5.0.0"
