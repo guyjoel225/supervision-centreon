@@ -1,0 +1,306 @@
+---
+# ===================================================================
+# Vérification de bout en bout.
+#
+# Ce playbook ne configure rien. Il produit une preuve d'exécution pour
+# chaque maillon de la chaîne, du démon SNMP jusqu'au statut remonté par
+# le moteur Centreon. Un playbook qui se termine sans erreur ne prouve
+# rien tant qu'on n'a pas vu la donnée arriver.
+#
+# Usage : ansible-playbook playbooks/99-verify.yml
+# ===================================================================
+
+- name: Vérifier les agents SNMP sur les hôtes supervisés
+  hosts: monitored
+  gather_facts: true
+  tags: [verify, verify_agents]
+  tasks:
+
+    # Interroger les deux états voulus coûte moins d'une seconde, là où
+    # service_facts énumérait toutes les unités systemd de chaque machine.
+    - name: Relever l'état du démon SNMP
+      ansible.builtin.systemd_service:
+        name: snmpd
+      register: _verify_snmpd
+      changed_when: false
+      failed_when: false
+
+    - name: Exiger que snmpd tourne et soit activé au démarrage
+      vars:
+        _etat: "{{ (_verify_snmpd.status | default({})).get('ActiveState', 'inconnu') }}"
+        _demarrage: "{{ (_verify_snmpd.status | default({})).get('UnitFileState', 'inconnu') }}"
+      ansible.builtin.assert:
+        that:
+          - _etat == 'active'
+          - _demarrage == 'enabled'
+        fail_msg: >-
+          snmpd n'est pas opérationnel sur {{ inventory_hostname }} :
+          service {{ _etat }}, démarrage automatique {{ _demarrage }}.
+        success_msg: "snmpd actif et activé au démarrage sur {{ inventory_hostname }}"
+        quiet: true
+
+    - name: Relever les adresses sur lesquelles l'agent écoute
+      ansible.builtin.shell:
+        cmd: set -o pipefail && ss -lnup | grep ':{{ snmp_agent_port }}' || true
+        executable: /bin/bash
+      register: _verify_listen
+      changed_when: false
+
+    - name: Exiger que l'agent écoute sur son adresse de service
+      ansible.builtin.assert:
+        that:
+          - snmp_agent_listen_address in _verify_listen.stdout
+        fail_msg: >-
+          Aucune écoute SNMP sur {{ snmp_agent_listen_address }}:{{ snmp_agent_port }}.
+          Sockets relevés : {{ _verify_listen.stdout | default('aucun') }}
+        success_msg: "Agent en écoute sur {{ snmp_agent_listen_address }}:{{ snmp_agent_port }}"
+        quiet: true
+
+    # La présence de « usmUser » dans le fichier persistant ne prouve rien :
+    # net-snmp ne l'y écrit qu'à l'arrêt du démon. Sur un agent qui tourne, la
+    # ligne est absente alors que l'utilisateur existe et répond. La seule
+    # preuve valable est une requête qui aboutit.
+    - name: Préparer un répertoire de test SNMP
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: snmpverif
+      register: _verify_probe_dir
+      changed_when: false
+
+    # Les phrases secrètes ne passent jamais par une ligne de commande, où ps
+    # les rendrait lisibles par tout utilisateur de la machine.
+    - name: Déposer les paramètres de test SNMP v3
+      ansible.builtin.copy:
+        dest: "{{ _verify_probe_dir.path }}/snmp.conf"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          defVersion 3
+          defSecurityLevel authPriv
+          defSecurityName {{ snmp_agent_v3_user }}
+          defAuthType {{ snmp_agent_v3_auth_protocol }}
+          defAuthPassphrase {{ snmp_agent_v3_auth_passphrase }}
+          defPrivType {{ snmp_agent_v3_priv_protocol }}
+          defPrivPassphrase {{ snmp_agent_v3_priv_passphrase }}
+      no_log: true
+      changed_when: false
+
+    - name: Interroger l'agent avec l'utilisateur SNMP v3
+      ansible.builtin.command:
+        cmd: snmpget -Oqv 127.0.0.1:{{ snmp_agent_port }} .1.3.6.1.2.1.1.5.0
+      environment:
+        SNMPCONFPATH: "{{ _verify_probe_dir.path }}"
+      register: _verify_user
+      changed_when: false
+      failed_when: false
+
+    - name: Retirer les paramètres de test
+      ansible.builtin.file:
+        path: "{{ _verify_probe_dir.path }}"
+        state: absent
+      changed_when: false
+
+    - name: Exiger que l'utilisateur SNMP v3 réponde
+      ansible.builtin.assert:
+        that:
+          - _verify_user.rc == 0
+          - _verify_user.stdout | trim | length > 0
+        fail_msg: >-
+          L'utilisateur SNMP v3 {{ snmp_agent_v3_user }} ne répond pas sur
+          {{ inventory_hostname }} : {{ _verify_user.stderr | default(_verify_user.stdout) | trim | default('aucune réponse', true) }}
+        success_msg: >-
+          L'utilisateur SNMP v3 répond sur {{ inventory_hostname }},
+          nom système « {{ _verify_user.stdout | trim }} »
+        quiet: true
+
+- name: Interroger chaque hôte depuis le serveur central
+  hosts: centreon_central
+  gather_facts: true
+  tags: [verify, verify_snmp]
+  tasks:
+
+    # Une vérification prouve une collecte réelle : elle n'a aucun sens en
+    # simulation, où aucun paquet n'est posé et où tempfile ne crée rien.
+    # Le play s'arrête donc proprement plutôt que d'échouer sur des données
+    # que la simulation ne pouvait pas produire.
+    - name: Expliquer pourquoi la vérification ne tourne pas en simulation
+      when: ansible_check_mode
+      ansible.builtin.debug:
+        msg: >-
+          Vérification ignorée : le mode simulation ne peut pas prouver une
+          collecte SNMP réelle. Relancer sans --check pour l'obtenir.
+
+    - name: Terminer le play en simulation
+      when: ansible_check_mode
+      ansible.builtin.meta: end_play
+
+    # Les passphrases ne sont pas passées en ligne de commande : elles
+    # seraient alors lisibles par tout utilisateur via ps. Elles transitent
+    # par un fichier de configuration temporaire, en lecture root seule.
+    - name: Créer un répertoire de configuration SNMP temporaire
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: snmpcheck
+      register: _verify_snmpdir
+      changed_when: false
+
+    - name: Déposer les paramètres SNMP v3 de vérification
+      ansible.builtin.copy:
+        dest: "{{ _verify_snmpdir.path }}/snmp.conf"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          defVersion 3
+          defSecurityLevel authPriv
+          defSecurityName {{ snmp_agent_v3_user }}
+          defAuthType {{ snmp_agent_v3_auth_protocol }}
+          defAuthPassphrase {{ snmp_agent_v3_auth_passphrase }}
+          defPrivType {{ snmp_agent_v3_priv_protocol }}
+          defPrivPassphrase {{ snmp_agent_v3_priv_passphrase }}
+      no_log: true
+      changed_when: false
+
+    - name: Interroger le nom système de chaque hôte supervisé
+      ansible.builtin.command:
+        cmd: snmpget -Oqv {{ hostvars[item].ansible_host }} .1.3.6.1.2.1.1.5.0
+      environment:
+        SNMPCONFPATH: "{{ _verify_snmpdir.path }}"
+      loop: "{{ groups['monitored'] | sort }}"
+      register: _verify_snmpget
+      changed_when: false
+      failed_when: false
+
+    - name: Exécuter le plugin Centreon sur chaque hôte supervisé
+      ansible.builtin.command:
+        cmd: >-
+          /usr/lib/centreon/plugins/centreon_linux_snmp.pl
+          --plugin=os::linux::snmp::plugin
+          --mode=load
+          --hostname={{ hostvars[item].ansible_host }}
+          --snmp-version=3
+          --snmp-username={{ snmp_agent_v3_user }}
+          --authprotocol={{ snmp_agent_v3_auth_protocol }}
+          --authpassphrase={{ snmp_agent_v3_auth_passphrase }}
+          --privprotocol={{ snmp_agent_v3_priv_protocol }}
+          --privpassphrase={{ snmp_agent_v3_priv_passphrase }}
+      loop: "{{ groups['monitored'] | sort }}"
+      register: _verify_plugin
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Effacer les paramètres SNMP temporaires
+      ansible.builtin.file:
+        path: "{{ _verify_snmpdir.path }}"
+        state: absent
+      changed_when: false
+
+    - name: Présenter le résultat de la collecte SNMP
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item }} ({{ hostvars[item.item].ansible_host }}) :
+          {{ 'répond ' ~ item.stdout | trim if item.rc == 0
+             else 'NE RÉPOND PAS -> ' ~ (item.stderr | default(item.stdout) | trim) }}
+      loop: "{{ _verify_snmpget.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Exiger que tous les hôtes répondent en SNMP v3
+      ansible.builtin.assert:
+        that:
+          - _verify_snmpget.results | selectattr('rc', 'ne', 0) | list | length == 0
+        fail_msg: >-
+          Hôtes injoignables en SNMP v3 depuis le central :
+          {{ _verify_snmpget.results | selectattr('rc', 'ne', 0)
+             | map(attribute='item') | join(', ') }}
+        success_msg: >-
+          Les {{ groups['monitored'] | length }} hôtes supervisés répondent en SNMP v3.
+        quiet: true
+
+    - name: Exiger que le plugin Centreon collecte réellement des métriques
+      ansible.builtin.assert:
+        that:
+          - _verify_plugin.results | selectattr('rc', 'ne', 0) | list | length == 0
+        fail_msg: >-
+          Le plugin Linux SNMP échoue sur :
+          {{ _verify_plugin.results | selectattr('rc', 'ne', 0)
+             | map(attribute='item') | join(', ') }}.
+          L'agent répond peut-être, mais la vue SNMP ne couvre pas les OID
+          attendus par le plugin.
+        success_msg: "Le plugin Linux SNMP collecte sur tous les hôtes supervisés."
+        quiet: true
+
+- name: Vérifier la plateforme Centreon elle-même
+  hosts: centreon_central
+  gather_facts: true
+  tags: [verify, verify_central]
+  tasks:
+
+    - name: Relever l'état des services de la plateforme
+      ansible.builtin.service_facts:
+
+    - name: Exiger que les services essentiels tournent
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services[item ~ '.service'].state == 'running'
+        fail_msg: >-
+          Le service {{ item }} n'est pas actif sur {{ inventory_hostname }}
+          (état : {{ ansible_facts.services[item ~ '.service'].state | default('absent') }}).
+        quiet: true
+      loop:
+        - httpd
+        - php-fpm
+        - mariadb
+        - cbd
+        - centengine
+        - gorgoned
+
+    - name: Ouvrir une session sur l'API de configuration
+      ansible.builtin.uri:
+        url: "{{ centreon_api_url }}?action=authenticate"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ centreon_api_user }}"
+          password: "{{ centreon_api_password }}"
+        return_content: true
+      register: _verify_auth
+      no_log: true
+
+    - name: Lister les hôtes connus de Centreon
+      ansible.builtin.uri:
+        url: "{{ centreon_api_url }}?action=action&object=centreon_clapi"
+        method: POST
+        headers:
+          centreon-auth-token: "{{ _verify_auth.json.authToken }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          action: show
+          object: HOST
+        return_content: true
+      register: _verify_hosts
+      changed_when: false
+
+    - name: Exiger que tout l'inventaire soit déclaré dans Centreon
+      vars:
+        _declared: "{{ _verify_hosts.json.result | default([]) | map(attribute='name') | list }}"
+        _missing: "{{ groups['monitored'] | difference(_declared) }}"
+      ansible.builtin.assert:
+        that:
+          - _missing | length == 0
+        fail_msg: "Hôtes absents de la configuration Centreon : {{ _missing | join(', ') }}"
+        success_msg: >-
+          Les {{ groups['monitored'] | length }} hôtes de l'inventaire sont
+          déclarés dans Centreon.
+        quiet: true
+
+    - name: Rappeler où consulter la supervision
+      ansible.builtin.debug:
+        msg: >-
+          Interface Centreon accessible sur
+          {{ centreon_web_protocol }}://{{ ansible_host }}:{{ centreon_web_port }}/centreon
+          Les statuts passent au vert après le premier cycle de contrôle,
+          soit quelques minutes après l'export de la configuration.

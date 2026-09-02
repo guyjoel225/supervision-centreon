@@ -1,0 +1,234 @@
+---
+# ===================================================================
+# Vérification des agents SNMP, sans serveur central.
+#
+# Ce playbook existe pour une raison précise : le central Centreon exige
+# un système d'exploitation qui n'est pas toujours disponible tout de
+# suite. Rien ne justifie pour autant d'attendre avant de prouver que la
+# collecte fonctionne. C'est donc le contrôleur Ansible qui joue ici le
+# rôle d'interrogateur, à la place du central.
+#
+# Il ne configure rien et ne remplace pas 99-verify.yml, qui reste la
+# vérification de référence une fois le central en service.
+#
+# Usage : ansible-playbook playbooks/98-verify-snmp-agents.yml
+# ===================================================================
+
+- name: Ouvrir temporairement les agents au contrôleur
+  hosts: monitored
+  gather_facts: true
+  tags: [verify_snmp_local]
+  tasks:
+
+    # La liste de référence est mémorisée AVANT d'être augmentée. Sans cela,
+    # le play de fermeture comparerait à une liste qui contient déjà le
+    # contrôleur, conclurait qu'il est légitime et ne retirerait jamais rien.
+    - name: Mémoriser la liste de référence des gestionnaires
+      ansible.builtin.set_fact:
+        _probe_reference_managers: "{{ snmp_agent_allowed_managers | default([]) }}"
+
+    # Le filtre unique évite de traiter deux fois la même adresse quand le
+    # contrôleur figure déjà parmi les gestionnaires déclarés, ce qui est le
+    # cas dès lors qu'il est lui-même autorisé à interroger les agents.
+    - name: Ajouter le contrôleur aux gestionnaires autorisés
+      ansible.builtin.set_fact:
+        snmp_agent_allowed_managers: >-
+          {{ (_probe_reference_managers
+              + [hostvars[groups['ansible_controller'][0]].ansible_host])
+             | unique }}
+
+    - name: Réappliquer le pare-feu avec cette autorisation
+      ansible.builtin.include_role:
+        name: snmp_agent
+        tasks_from: firewall.yml
+      when: snmp_agent_manage_firewall | bool
+
+- name: Interroger les agents depuis le contrôleur Ansible
+  hosts: ansible_controller
+  gather_facts: true
+  tags: [verify_snmp_local]
+  tasks:
+
+    # Une vérification prouve une collecte réelle : elle n'a aucun sens en
+    # simulation, où aucun paquet n'est posé et où tempfile ne crée rien.
+    # Le play s'arrête donc proprement plutôt que d'échouer sur des données
+    # que la simulation ne pouvait pas produire.
+    - name: Expliquer pourquoi la vérification ne tourne pas en simulation
+      when: ansible_check_mode
+      ansible.builtin.debug:
+        msg: >-
+          Vérification ignorée : le mode simulation ne peut pas prouver une
+          collecte SNMP réelle. Relancer sans --check pour l'obtenir.
+
+    - name: Terminer le play en simulation
+      when: ansible_check_mode
+      ansible.builtin.meta: end_play
+
+    - name: Installer les outils SNMP sur le contrôleur
+      ansible.builtin.package:
+        name: "{{ 'snmp' if ansible_facts['os_family'] == 'Debian' else 'net-snmp-utils' }}"
+        state: present
+
+    # Les passphrases ne passent jamais par une ligne de commande, où ps les
+    # rendrait lisibles par tout utilisateur de la machine.
+    - name: Créer un répertoire de configuration SNMP temporaire
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: snmpcheck
+      register: _probe_dir
+      changed_when: false
+
+    # Les paramètres correspondent à la version réellement activée sur les
+    # agents. Quand les deux coexistent, la v3 est éprouvée en priorité :
+    # c'est elle qui doit fonctionner à terme.
+    - name: Déposer les paramètres SNMP de vérification
+      ansible.builtin.copy:
+        dest: "{{ _probe_dir.path }}/snmp.conf"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          {% if snmp_agent_enable_v3 | default(true) %}
+          defVersion 3
+          defSecurityLevel authPriv
+          defSecurityName {{ snmp_agent_v3_user }}
+          defAuthType {{ snmp_agent_v3_auth_protocol }}
+          defAuthPassphrase {{ snmp_agent_v3_auth_passphrase }}
+          defPrivType {{ snmp_agent_v3_priv_protocol }}
+          defPrivPassphrase {{ snmp_agent_v3_priv_passphrase }}
+          {% else %}
+          defVersion 2c
+          defCommunity {{ snmp_agent_v2c_community }}
+          {% endif %}
+      no_log: true
+      changed_when: false
+
+    - name: Rappeler quelle version est éprouvée
+      ansible.builtin.debug:
+        msg: >-
+          Vérification menée en SNMP
+          {{ 'v3 authentifié et chiffré' if snmp_agent_enable_v3 | default(true)
+             else 'v2c, communauté en clair' }}.
+
+    - name: Relever le nom système de chaque hôte supervisé
+      ansible.builtin.command:
+        cmd: snmpget -Oqv {{ hostvars[item].ansible_host }} .1.3.6.1.2.1.1.5.0
+      environment:
+        SNMPCONFPATH: "{{ _probe_dir.path }}"
+      loop: "{{ groups['monitored'] | sort }}"
+      register: _probe_name
+      changed_when: false
+      failed_when: false
+
+    # Cette branche est celle que consomment les plugins Linux de Centreon.
+    # Si elle répond, la vue SNMP est correctement dimensionnée.
+    - name: Relever la charge système de chaque hôte supervisé
+      ansible.builtin.command:
+        cmd: snmpget -Oqv {{ hostvars[item].ansible_host }} .1.3.6.1.4.1.2021.10.1.3.1
+      environment:
+        SNMPCONFPATH: "{{ _probe_dir.path }}"
+      loop: "{{ groups['monitored'] | sort }}"
+      register: _probe_load
+      changed_when: false
+      failed_when: false
+
+    - name: Effacer les paramètres SNMP temporaires
+      ansible.builtin.file:
+        path: "{{ _probe_dir.path }}"
+        state: absent
+      changed_when: false
+
+    - name: Présenter la collecte obtenue
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.0.item }} ({{ hostvars[item.0.item].ansible_host }}) :
+          {{ 'nom=' ~ (item.0.stdout | trim) ~ ' charge=' ~ (item.1.stdout | trim)
+             if item.0.rc == 0
+             else 'INJOIGNABLE -> ' ~ (item.0.stderr | default(item.0.stdout) | trim) }}
+      loop: "{{ _probe_name.results | zip(_probe_load.results) | list }}"
+      loop_control:
+        label: "{{ item.0.item }}"
+
+    - name: Exiger que tous les agents répondent en SNMP v3
+      ansible.builtin.assert:
+        that:
+          - _probe_name.results | selectattr('rc', 'ne', 0) | list | length == 0
+        fail_msg: >-
+          Agents injoignables :
+          {{ _probe_name.results | selectattr('rc', 'ne', 0)
+             | map(attribute='item') | join(', ') }}
+        success_msg: >-
+          Les {{ groups['monitored'] | length }} agents répondent en SNMP v3
+          authentifié et chiffré.
+        quiet: true
+
+    - name: Exiger que la vue SNMP couvre les compteurs attendus par Centreon
+      ansible.builtin.assert:
+        that:
+          - _probe_load.results | selectattr('rc', 'ne', 0) | list | length == 0
+        fail_msg: >-
+          La branche UCD-SNMP ne répond pas sur :
+          {{ _probe_load.results | selectattr('rc', 'ne', 0)
+             | map(attribute='item') | join(', ') }}.
+          L'agent est joignable mais sa vue est trop étroite pour les plugins
+          Linux de Centreon.
+        success_msg: >-
+          La vue SNMP expose bien les compteurs consommés par les plugins Linux.
+        quiet: true
+
+- name: Refermer l'ouverture temporaire accordée au contrôleur
+  hosts: monitored
+  gather_facts: true
+  tags: [verify_snmp_local]
+  tasks:
+
+    # Ce que ce playbook ouvre, il le referme. Le rôle purge désormais les
+    # autorisations obsolètes, mais il ne sera pas forcément rejoué : la
+    # fermeture est donc explicite ici.
+    - name: Relever l'état de firewalld
+      ansible.builtin.systemd_service:
+        name: firewalld
+      register: _probe_firewalld
+      changed_when: false
+      failed_when: false
+
+    - name: Relever l'état de ufw
+      when: ansible_facts['os_family'] == 'Debian'
+      ansible.builtin.command:
+        cmd: ufw status
+      register: _probe_ufw
+      changed_when: false
+      failed_when: false
+
+    - name: Retirer l'autorisation temporaire du contrôleur dans firewalld
+      when:
+        - (_probe_firewalld.status | default({})).get('ActiveState', '') == 'active'
+        - _probe_manager not in (_probe_reference_managers | default([]))
+      vars:
+        _probe_manager: "{{ hostvars[groups['ansible_controller'][0]].ansible_host }}"
+      ansible.posix.firewalld:
+        rich_rule: >-
+          rule family="ipv4"
+          source address="{{ _probe_manager }}"
+          port port="{{ snmp_agent_port }}" protocol="udp"
+          accept
+        permanent: true
+        immediate: true
+        state: disabled
+
+    - name: Retirer l'autorisation temporaire du contrôleur dans ufw
+      when:
+        - "'Status: active' in (_probe_ufw.stdout | default(''))"
+        - _probe_manager not in (_probe_reference_managers | default([]))
+      vars:
+        _probe_manager: "{{ hostvars[groups['ansible_controller'][0]].ansible_host }}"
+      community.general.ufw:
+        rule: allow
+        src: "{{ _probe_manager }}"
+        port: "{{ snmp_agent_port }}"
+        proto: udp
+        delete: true
+
+    - name: Rétablir la liste de référence des gestionnaires
+      ansible.builtin.set_fact:
+        snmp_agent_allowed_managers: "{{ _probe_reference_managers | default([]) }}"
