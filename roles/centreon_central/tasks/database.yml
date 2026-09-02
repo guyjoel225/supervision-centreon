@@ -1,0 +1,126 @@
+---
+- name: Démarrer et activer MariaDB
+  ansible.builtin.service:
+    name: mariadb
+    state: started
+    enabled: true
+
+- name: Installer le connecteur Python pour MariaDB
+  ansible.builtin.dnf:
+    name: python3-PyMySQL
+    state: present
+
+# L'assistant d'installation de Centreon se connecte à la base en tant que
+# root avec un mot de passe. Or MariaDB authentifie root par socket Unix à
+# l'installation, ce qui fait échouer cette connexion avec l'erreur 1698.
+# On bascule donc root sur une authentification par mot de passe.
+# L'assistant d'installation de Centreon se connecte à la base sous le compte
+# de php-fpm, et non sous root. Or MariaDB installe root@localhost avec DEUX
+# méthodes d'authentification : le mot de passe, et unix_socket. Seul le
+# compte système root satisfait la seconde ; tout autre compte se voit
+# refuser l'accès avec le code 1698, y compris par le réseau.
+#
+# Une tentative en root réussit donc toujours, mais par unix_socket, ce qui
+# ne prouve rien sur le mot de passe. C'est ce faux positif qui masquait le
+# problème.
+#
+# Plutôt que de retirer unix_socket à root, ce qui ferait perdre l'accès
+# « sudo mariadb » sans mot de passe à l'exploitant, un compte dédié est créé
+# pour l'installation. Il n'a qu'une méthode d'authentification, le mot de
+# passe, et fonctionne donc depuis n'importe quel compte système.
+
+- name: Créer le compte d'administration employé par l'assistant
+  ansible.mysql.mysql_user:
+    login_unix_socket: "{{ centreon_central_db_socket }}"
+    name: "{{ centreon_central_db_admin_user }}"
+    host: localhost
+    password: "{{ centreon_central_db_admin_password }}"
+    plugin: mysql_native_password
+    priv: "*.*:ALL,GRANT"
+    state: present
+  no_log: true
+
+- name: Éprouver ce compte depuis un autre compte système que root
+  become: true
+  become_user: "{{ centreon_central_web_user }}"
+  ansible.mysql.mysql_info:
+    login_host: "{{ centreon_central_db_host }}"
+    login_port: "{{ centreon_central_db_port }}"
+    login_user: "{{ centreon_central_db_admin_user }}"
+    login_password: "{{ centreon_central_db_admin_password }}"
+    filter: version
+  register: _centreon_central_db_admin_ok
+  changed_when: false
+  no_log: true
+
+- name: Confirmer que le compte d'administration est utilisable
+  ansible.builtin.assert:
+    that:
+      - _centreon_central_db_admin_ok.version is defined
+    fail_msg: >-
+      Le compte « {{ centreon_central_db_admin_user }} » ne parvient pas à
+      joindre la base depuis le compte {{ centreon_central_web_user }}, qui est
+      celui de l'assistant d'installation. Sans cela, l'assistant échouera à
+      l'étape de la base de données avec un message parlant du mot de passe de
+      root, qui n'est pas la cause.
+    success_msg: >-
+      Le compte « {{ centreon_central_db_admin_user }} » joint la base depuis
+      {{ centreon_central_web_user }} : l'assistant pourra s'en servir.
+    quiet: true
+
+- name: Refuser de durcir une base de données préexistante
+  when:
+    - centreon_central_db_harden | bool
+    - "'mariadb' in (_centreon_central_busy_services | default([])) or 'mysqld' in (_centreon_central_busy_services | default([]))"
+  ansible.builtin.debug:
+    msg: >-
+      La base de données tournait déjà avant ce déploiement sur
+      {{ inventory_hostname }} : son durcissement est ignoré. Supprimer les
+      comptes anonymes et la base « test » d'une instance qui sert déjà une
+      autre application n'est pas une décision qui revient à ce rôle.
+
+- name: Confirmer que root répond désormais par mot de passe
+  when: _centreon_central_db_root_ok.version is not defined
+  ansible.mysql.mysql_info:
+    login_user: "{{ centreon_central_db_root_user }}"
+    login_password: "{{ centreon_central_db_root_password }}"
+    login_unix_socket: "{{ centreon_central_db_socket }}"
+    filter: version
+  register: _centreon_central_db_root_apres
+  changed_when: false
+  no_log: true
+
+- name: Durcir la base de données
+  when:
+    - centreon_central_db_harden | bool
+    - "'mariadb' not in (_centreon_central_busy_services | default([]))"
+    - "'mysqld' not in (_centreon_central_busy_services | default([]))"
+  vars:
+    # Connexion par le socket en tant que root système, ce qui fonctionne
+    # grâce à unix_socket sans dépendre d'un mot de passe.
+    _db_login: &db_login
+      login_unix_socket: "{{ centreon_central_db_socket }}"
+  block:
+    - name: Supprimer les comptes anonymes
+      ansible.mysql.mysql_user:
+        <<: *db_login
+        name: ""
+        host_all: true
+        state: absent
+
+    - name: Interdire la connexion de root depuis le réseau
+      ansible.mysql.mysql_user:
+        <<: *db_login
+        name: root
+        host: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ ansible_facts['hostname'] }}"
+        - "::1"
+        - "%"
+
+    - name: Supprimer la base de démonstration
+      ansible.mysql.mysql_db:
+        <<: *db_login
+        name: test
+        state: absent

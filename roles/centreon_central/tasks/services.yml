@@ -1,0 +1,18 @@
+---
+- name: Activer les services de la plateforme
+  ansible.builtin.service:
+    name: "{{ item }}"
+    enabled: true
+  loop: "{{ centreon_central_services }}"
+  # centengine, cbd et gorgoned ne peuvent démarrer qu'une fois la base
+  # initialisée par l'assistant : ils sont activés ici, démarrés plus tard.
+
+- name: Démarrer les services nécessaires à l'assistant d'installation
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+  loop:
+    - mariadb
+    - php-fpm
+    - httpd
+    - crond

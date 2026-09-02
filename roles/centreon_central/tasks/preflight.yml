@@ -1,0 +1,103 @@
+---
+# Contrôle préalable, avant toute modification.
+#
+# Le rôle centreon_central pose une plateforme complète : il abaisse SELinux,
+# bascule le flux PHP de la machine, installe et durcit MariaDB en supprimant
+# des comptes et une base, et redémarre httpd, php-fpm et mariadb. Toutes ces
+# actions sont légitimes sur une machine dédiée à Centreon. Aucune ne l'est
+# sur un serveur qui héberge déjà autre chose.
+#
+# On relève donc l'état AVANT d'agir. Si la machine sert déjà un service web
+# ou une base de données, le déploiement s'arrête et le dit, plutôt que de
+# découvrir le conflit une fois la base durcie et Apache redémarré.
+
+# Un central déjà posé fait tourner httpd, mariadb et php-fpm : ce sont ses
+# propres services, tirés par ses paquets. Sans cette distinction, le contrôle
+# ci-dessous refuserait de reprendre une installation interrompue, en prenant
+# les services de Centreon pour des services concurrents.
+- name: Relever si Centreon est déjà installé sur cette machine
+  ansible.builtin.stat:
+    path: /usr/share/centreon/www
+  register: _centreon_central_deja_installe
+
+- name: Relever l'état de SELinux avant toute modification
+  ansible.builtin.command: getenforce
+  register: _centreon_central_selinux_before
+  changed_when: false
+  failed_when: false
+
+- name: Relever les services déjà en fonction sur la machine
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+  loop:
+    - httpd
+    - nginx
+    - mariadb
+    - mysqld
+    - php-fpm
+  register: _centreon_central_preexisting
+  changed_when: false
+  failed_when: false
+
+- name: Retenir ceux qui tournaient déjà
+  ansible.builtin.set_fact:
+    _centreon_central_busy_services: >-
+      {{ _centreon_central_preexisting.results
+         | selectattr('status', 'defined')
+         | selectattr('status.ActiveState', 'defined')
+         | selectattr('status.ActiveState', 'equalto', 'active')
+         | map(attribute='item') | list }}
+
+- name: Signaler que la machine est vierge de tout service concurrent
+  when:
+    - _centreon_central_busy_services | length == 0
+    - not _centreon_central_deja_installe.stat.exists
+  ansible.builtin.debug:
+    msg: >-
+      Aucun service web ni base de données ne tourne déjà sur
+      {{ inventory_hostname }} : la machine peut être traitée comme dédiée
+      à Centreon.
+
+- name: Signaler que l'on reprend une installation existante
+  when: _centreon_central_deja_installe.stat.exists
+  ansible.builtin.debug:
+    msg: >-
+      Centreon est déjà installé sur {{ inventory_hostname }}. Les services
+      relevés ({{ _centreon_central_busy_services | join(', ') | default('aucun', true) }})
+      sont les siens, tirés par ses propres paquets : le contrôle de machine
+      dédiée ne s'applique donc pas, et l'exécution reprend là où elle en est.
+
+- name: Refuser d'installer un central sur une machine déjà occupée
+  when:
+    - not _centreon_central_deja_installe.stat.exists
+    - _centreon_central_busy_services | length > 0
+    - not centreon_central_allow_shared_host | bool
+  ansible.builtin.fail:
+    msg: >-
+      {{ inghost }} fait déjà tourner : {{ _centreon_central_busy_services | join(', ') }}.
+      Installer un serveur central Centreon ici abaisserait SELinux, ferait
+      basculer le flux PHP de toute la machine, supprimerait les comptes
+      anonymes et la base « test » de la base de données existante, puis
+      redémarrerait le service web et la base. Chacune de ces actions peut
+      interrompre ce qui tourne déjà.
+      Le déploiement s'arrête volontairement. Deux issues : dédier une machine
+      au central, ce qui est la configuration prévue par Centreon, ou, après
+      avoir mesuré les conséquences sur les services listés ci-dessus, relancer
+      avec -e centreon_central_allow_shared_host=true. Dans ce second cas,
+      passer aussi centreon_central_db_harden à false pour ne pas toucher aux
+      comptes d'une base qui ne vous appartient pas.
+  vars:
+    inghost: "{{ inventory_hostname }}"
+
+- name: Avertir avant d'abaisser SELinux
+  when:
+    - centreon_central_selinux_state in ['permissive', 'disabled']
+    - (_centreon_central_selinux_before.stdout | default('') | trim | lower) == 'enforcing'
+  ansible.builtin.debug:
+    msg: >-
+      SELinux est actuellement en « enforcing » sur {{ inventory_hostname }} et
+      va être abaissé en « {{ centreon_central_selinux_state }} ». C'est ce que
+      documente Centreon, mais c'est une réduction du niveau de sécurité de la
+      machine. Pour la conserver en enforcing, positionner
+      centreon_central_selinux_state à « enforcing » et prévoir une politique
+      SELinux dédiée à Centreon.

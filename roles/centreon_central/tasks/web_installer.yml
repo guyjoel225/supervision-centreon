@@ -1,0 +1,630 @@
+---
+# L'installation d'un central Centreon se termine normalement par un assistant
+# web en neuf écrans. Le dérouler à la main interdit tout redéploiement
+# reproductible, on le rejoue donc ici en HTTP.
+#
+# Les scripts appelés sont ceux de l'assistant lui-même, dans l'ordre imposé
+# par www/install/steps/templates/step7.tpl. Ils répondent tous un JSON dont le
+# champ « result » vaut 0 en cas de succès, et le champ « msg » porte l'erreur
+# sinon : c'est ce contrat qui sert de critère d'échec ci-dessous.
+
+# Une plateforme installée se reconnaît à deux choses, pas une seule : son
+# fichier de configuration ET des bases qui contiennent des tables. Le fichier
+# est écrit tôt dans l'assistant, bien avant que les bases soient remplies :
+# s'y fier seul fait conclure à tort qu'une installation interrompue est
+# terminée, avec pour conséquence de sauter la reprise et de retirer le
+# répertoire de l'assistant, qui devient alors introuvable.
+- name: Relever le fichier de configuration de la plateforme
+  ansible.builtin.stat:
+    path: /etc/centreon/centreon.conf.php
+  register: _centreon_central_conf_fichier
+
+- name: Compter les tables des bases de Centreon
+  ansible.mysql.mysql_query:
+    login_unix_socket: "{{ centreon_central_db_socket }}"
+    query: >-
+      SELECT COUNT(*) AS total FROM information_schema.tables
+      WHERE table_schema IN ('{{ centreon_central_db_configuration }}',
+                             '{{ centreon_central_db_storage }}')
+  register: _centreon_central_tables_actuelles
+  failed_when: false
+  changed_when: false
+
+- name: Établir si la plateforme est réellement installée
+  ansible.builtin.set_fact:
+    _centreon_central_conf:
+      stat:
+        exists: >-
+          {{ _centreon_central_conf_fichier.stat.exists
+             and (_centreon_central_tables_actuelles.query_result[0][0].total | default(0) | int) > 100 }}
+    _centreon_central_etat_incoherent: >-
+      {{ _centreon_central_conf_fichier.stat.exists
+         and (_centreon_central_tables_actuelles.query_result[0][0].total | default(0) | int) <= 100 }}
+
+- name: Signaler un état incohérent et le réparer
+  when: _centreon_central_etat_incoherent | bool
+  block:
+
+    - name: Refuser de réparer sans autorisation explicite
+      when: not centreon_central_reset_incomplete_install | bool
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} est dans un état incohérent : le fichier
+          /etc/centreon/centreon.conf.php existe, mais les bases ne comptent
+          que {{ _centreon_central_tables_actuelles.query_result[0][0].total | default(0) }}
+          tables. L'installation a donc été interrompue après l'écriture de la
+          configuration, et l'interface ne peut pas fonctionner.
+          Relancer avec -e centreon_central_reset_incomplete_install=true pour
+          repartir proprement : le répertoire de l'assistant sera restauré s'il
+          manque, la configuration retirée, et l'installation reprise depuis le
+          début.
+
+    - name: Restaurer le répertoire de l'assistant s'il a été retiré
+      ansible.builtin.stat:
+        path: /usr/share/centreon/www/install/install.php
+      register: _centreon_central_assistant
+
+    - name: Réinstaller le paquet qui fournit l'assistant
+      when: not _centreon_central_assistant.stat.exists
+      ansible.builtin.command:
+        cmd: dnf reinstall -y centreon-web
+      register: _centreon_central_reinstall
+      changed_when: _centreon_central_reinstall.rc == 0
+
+    - name: Retirer la configuration qui pointe sur des bases absentes
+      ansible.builtin.file:
+        path: /etc/centreon/centreon.conf.php
+        state: absent
+
+# Une installation interrompue laisse deux traces qui empêchent de la
+# reprendre : un compteur d'étape avancé dans tmp/step.json, et des bases
+# partiellement remplies. Les scripts refusent alors de recréer ce qui
+# existe déjà, et la reprise échoue sans que la cause soit visible.
+- name: Relever les traces d'une installation interrompue
+  when: not _centreon_central_conf.stat.exists
+  block:
+
+    - name: Relever le compteur d'étape laissé par un passage précédent
+      ansible.builtin.stat:
+        path: /usr/share/centreon/www/install/tmp/step.json
+      register: _centreon_central_compteur
+
+    - name: Compter les tables déjà présentes dans les bases
+      ansible.mysql.mysql_query:
+        login_unix_socket: "{{ centreon_central_db_socket }}"
+        query: >-
+          SELECT COUNT(*) AS total FROM information_schema.tables
+          WHERE table_schema IN ('{{ centreon_central_db_configuration }}',
+                                 '{{ centreon_central_db_storage }}')
+      register: _centreon_central_tables
+      failed_when: false
+      changed_when: false
+
+    - name: Refuser de reprendre une installation laissée à mi-chemin
+      when:
+        - (_centreon_central_tables.query_result[0][0].total | default(0) | int) > 0
+        - not centreon_central_reset_incomplete_install | bool
+      ansible.builtin.fail:
+        msg: >-
+          Une installation précédente s'est interrompue sur
+          {{ inventory_hostname }} : les bases contiennent déjà
+          {{ _centreon_central_tables.query_result[0][0].total }} tables, mais
+          /etc/centreon/centreon.conf.php n'a jamais été écrit. Reprendre en
+          l'état échouerait, les scripts refusant de recréer ce qui existe.
+          Relancer avec -e centreon_central_reset_incomplete_install=true pour
+          repartir de bases vides. Cette option DÉTRUIT les bases
+          « {{ centreon_central_db_configuration }} » et
+          « {{ centreon_central_db_storage }} » : elle n'est sans conséquence
+          que parce que cette installation n'a jamais abouti. Sur une
+          plateforme en service, ne jamais l'employer.
+
+    - name: Repartir de bases vides
+      when:
+        - (_centreon_central_tables.query_result[0][0].total | default(0) | int) > 0
+        - centreon_central_reset_incomplete_install | bool
+      ansible.mysql.mysql_db:
+        login_unix_socket: "{{ centreon_central_db_socket }}"
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ centreon_central_db_configuration }}"
+        - "{{ centreon_central_db_storage }}"
+
+    # Le répertoire est vidé entièrement, et non fichier par fichier.
+    #
+    # Outre les paramètres saisis, il contient des compteurs de progression :
+    # splitQueries y note combien de requêtes SQL il a déjà exécutées, pour
+    # reprendre où il s'était arrêté. Laisser ces compteurs après avoir
+    # détruit les bases fait repartir la création au milieu du fichier SQL,
+    # et les tables du début ne sont jamais créées. L'échec survient alors
+    # bien plus loin, sur une table absente, sans rapport apparent avec la
+    # cause.
+    - name: Relever ce que l'assistant a laissé derrière lui
+      ansible.builtin.find:
+        paths: /usr/share/centreon/www/install/tmp
+        file_type: any
+      register: _centreon_central_residus
+
+    - name: Remettre l'assistant à son premier écran
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _centreon_central_residus.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: S'assurer que le répertoire de travail existe et reste inscriptible
+      ansible.builtin.file:
+        path: /usr/share/centreon/www/install/tmp
+        state: directory
+        owner: centreon
+        group: centreon
+        mode: "0775"
+
+- name: Dérouler l'assistant
+  when: not _centreon_central_conf.stat.exists
+  block:
+
+    # Les paramètres attendus par les étapes 3 et 4 ne sont pas les mêmes
+    # d'une version de Centreon à l'autre : CENTREONBROKER_CBMOD existait en
+    # 24.10 et a disparu en 25.10. Les coder en dur revient à parier sur une
+    # version. Ils sont donc lus dans les fichiers de définition que Centreon
+    # installe lui-même, ce qui rend le rôle indifférent à la version.
+    #
+    # Un paramètre inconnu de la version en place n'est pas simplement
+    # ignoré : PHP compare son type absent à zéro, conclut qu'il s'agit d'un
+    # répertoire, et rejette l'étape avec un message qui désigne le chemin
+    # plutôt que le paramètre de trop.
+    - name: Lire la définition des paramètres du moteur
+      ansible.builtin.slurp:
+        src: /usr/share/centreon/www/install/var/engines/centreon-engine
+      register: _centreon_central_engine_def
+
+    - name: Lire la définition des paramètres du broker
+      ansible.builtin.slurp:
+        src: /usr/share/centreon/www/install/var/brokers/centreon-broker
+      register: _centreon_central_broker_def
+
+    - name: Construire les paramètres attendus par cette version
+      ansible.builtin.set_fact:
+        _centreon_central_engine_post: >-
+          {{ dict(_moteur | map('split', ';') | map('first') | map('lower') | list
+                  | zip(_moteur | map('split', ';') | map(attribute=4) | list))
+             | combine(centreon_central_engine_parameters) }}
+        _centreon_central_broker_post: >-
+          {{ dict(_broker | map('split', ';') | map('first') | map('lower') | list
+                  | zip(_broker | map('split', ';') | map(attribute=4) | list))
+             | combine(centreon_central_broker_parameters) }}
+      vars:
+        _moteur: >-
+          {{ (_centreon_central_engine_def.content | b64decode).splitlines()
+             | map('trim') | reject('match', '^#') | reject('equalto', '') | list }}
+        _broker: >-
+          {{ (_centreon_central_broker_def.content | b64decode).splitlines()
+             | map('trim') | reject('match', '^#') | reject('equalto', '') | list }}
+
+    - name: Attendre que l'interface web réponde
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/install.php"
+        method: GET
+        status_code: [200]
+      register: _centreon_central_session
+      retries: 12
+      delay: 5
+      until: _centreon_central_session.status == 200
+
+    # L'assistant tient un compteur d'étape dans tmp/step.json, et chaque
+    # écran est rendu par steps/step.php. Poster les scripts process_stepN
+    # sans faire avancer ce compteur revient à sauter les écrans 1 et 2 :
+    # or c'est l'écran 1 qui écrit tmp/configuration.json, d'où
+    # configFileSetup.php tire les chemins d'installation. Sans lui, ce
+    # script reçoit des valeurs nulles et tente d'écrire à la racine du
+    # système, ce qui fait échouer toute la suite en cascade.
+    - name: Afficher le premier écran, qui écrit la configuration de base
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/step.php?action=stepContent"
+        method: GET
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        status_code: [200]
+      changed_when: true
+
+    - name: Vérifier que la configuration de base a bien été écrite
+      ansible.builtin.stat:
+        path: /usr/share/centreon/www/install/tmp/configuration.json
+      register: _centreon_central_conf_base
+      failed_when: not _centreon_central_conf_base.stat.exists
+
+    - name: Avancer jusqu'à l'écran des chemins du moteur
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        method: GET
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        status_code: [200]
+      loop: [2, 3]
+      loop_control:
+        label: "écran {{ item }}"
+      changed_when: true
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: Renseigner les chemins du moteur de supervision
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/process/process_step3.php"
+        method: POST
+        body_format: form-urlencoded
+        body: "{{ _centreon_central_engine_post }}"
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        return_content: true
+      register: _centreon_central_step3
+      failed_when: >-
+        _centreon_central_step3.status != 200
+        or (_centreon_central_step3.content | from_json).required | length > 0
+        or (_centreon_central_step3.content | from_json).directory_not_found | length > 0
+        or (_centreon_central_step3.content | from_json).file_not_found | length > 0
+
+    - name: Avancer après l'écran 3
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        method: GET
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        status_code: [200]
+      changed_when: true
+
+    - name: Renseigner les chemins du broker
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/process/process_step4.php"
+        method: POST
+        body_format: form-urlencoded
+        body: "{{ _centreon_central_broker_post }}"
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        return_content: true
+      register: _centreon_central_step4
+      failed_when: >-
+        _centreon_central_step4.status != 200
+        or (_centreon_central_step4.content | from_json).required | length > 0
+        or (_centreon_central_step4.content | from_json).directory_not_found | length > 0
+        or (_centreon_central_step4.content | from_json).file_not_found | length > 0
+
+    - name: Avancer après l'écran 4
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        method: GET
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        status_code: [200]
+      changed_when: true
+
+    - name: Créer le compte administrateur
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/process/process_step5.php"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          admin_password: "{{ centreon_central_web_admin_password }}"
+          confirm_password: "{{ centreon_central_web_admin_password }}"
+          firstname: "{{ centreon_central_web_admin_firstname }}"
+          lastname: "{{ centreon_central_web_admin_lastname }}"
+          email: "{{ centreon_central_web_admin_email }}"
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        return_content: true
+      register: _centreon_central_step5
+      no_log: true
+      failed_when: _centreon_central_step5.status != 200
+
+    - name: Vérifier que Centreon a accepté le compte administrateur
+      vars:
+        _r: "{{ _centreon_central_step5.content | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - _r.required | length == 0
+          - _r.email
+          - _r.password
+          - _r.password_security_policy
+        fail_msg: >-
+          Centreon a refusé le compte administrateur.
+          Champs manquants : {{ _r.required | join(', ') | default('aucun', true) }}.
+          Adresse de courriel valide : {{ _r.email }}.
+          Confirmation identique : {{ _r.password }}.
+          Politique de mot de passe respectée : {{ _r.password_security_policy }}.
+          Cette politique exige au moins 12 caractères, avec une majuscule,
+          une minuscule, un chiffre et un caractère parmi @$!%*?&
+        quiet: true
+
+    - name: Avancer après l'écran 5
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        method: GET
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        status_code: [200]
+      changed_when: true
+
+    - name: Renseigner les paramètres de la base de données
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/process/process_step6.php"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          address: "{{ centreon_central_db_host }}"
+          port: "{{ centreon_central_db_port }}"
+          root_user: "{{ centreon_central_db_admin_user }}"
+          root_password: "{{ centreon_central_db_admin_password }}"
+          db_configuration: "{{ centreon_central_db_configuration }}"
+          db_storage: "{{ centreon_central_db_storage }}"
+          db_user: "{{ centreon_central_db_user }}"
+          db_password: "{{ centreon_central_db_password }}"
+          db_password_confirm: "{{ centreon_central_db_password }}"
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        return_content: true
+      register: _centreon_central_step6
+      no_log: true
+      failed_when: _centreon_central_step6.status != 200
+
+    - name: Vérifier que Centreon a joint la base de données
+      vars:
+        _r: "{{ _centreon_central_step6.content | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - _r.required | length == 0
+          - _r.password
+          - (_r.connection | trim) == ''
+        fail_msg: >-
+          Centreon n'a pas pu se connecter à la base de données.
+          Champs manquants : {{ _r.required | join(', ') | default('aucun', true) }}.
+          Message renvoyé par le moteur : {{ _r.connection | default('aucun', true) }}.
+          Un accès refusé de code 1698 signifie que le compte employé accepte
+          l'authentification unix_socket : elle ne peut aboutir que pour le
+          compte système du même nom, et l'assistant tourne sous
+          {{ centreon_central_web_user }}. Lancer playbooks/90-diagnostic-base.yml
+          pour l'établir.
+        quiet: true
+
+    - name: Avancer après l'écran 6
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        method: GET
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        status_code: [200]
+      changed_when: true
+
+    # Chaque étape est vérifiée avant de passer à la suivante : elles se
+    # transmettent un état, et poursuivre après un échec construit une base
+    # incohérente sans que rien ne le signale.
+    - name: Dérouler la création de la base de données
+      ansible.builtin.include_tasks: install_db_step.yml
+      loop: "{{ _centreon_central_install_db_steps }}"
+      loop_control:
+        loop_var: _centreon_central_etape
+
+    - name: Avancer vers l'écran des modules
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        method: GET
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        status_code: [200]
+        return_content: true
+      register: _centreon_central_ecran_modules
+      changed_when: true
+
+    # La liste vient de l'assistant lui-même, et non des répertoires présents
+    # sur le disque. Un module déjà installé y figure avec l'attribut
+    # « disabled » : le renvoyer fait lever à Centreon une exception fatale,
+    # « Widget already installed », qui interrompt toute l'étape. Cela se
+    # produit dès qu'un passage précédent en a posé une partie.
+    - name: Retenir ce qui reste réellement à installer
+      ansible.builtin.set_fact:
+        _centreon_central_modules_a_poser: >-
+          {{ _centreon_central_ecran_modules.content
+             | regex_findall('id="module_([^"]+)"\s*/>') }}
+        _centreon_central_widgets_a_poser: >-
+          {{ _centreon_central_ecran_modules.content
+             | regex_findall('id="widget_([^"]+)"\s*/>') }}
+        _centreon_central_deja_poses: >-
+          {{ _centreon_central_ecran_modules.content
+             | regex_findall('id="(?:module|widget)_([^"]+)" disabled') }}
+
+    - name: Annoncer ce qui va être installé
+      ansible.builtin.debug:
+        msg: >-
+          {{ _centreon_central_modules_a_poser | length }} module(s) et
+          {{ _centreon_central_widgets_a_poser | length }} widget(s) à installer.
+          {{ _centreon_central_deja_poses | length }} déjà en place, laissés
+          de côté : les renvoyer ferait échouer l'étape.
+
+    - name: Installer les modules et les widgets
+      when: >-
+        (_centreon_central_modules_a_poser | length > 0)
+        or (_centreon_central_widgets_a_poser | length > 0)
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/process/process_step8.php"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          "modules[]": "{{ _centreon_central_modules_a_poser }}"
+          "widgets[]": "{{ _centreon_central_widgets_a_poser }}"
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        return_content: true
+        timeout: 600
+      register: _centreon_central_step8
+      changed_when: true
+      failed_when: _centreon_central_step8.status != 200
+
+    - name: Avancer vers l'écran de clôture
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        method: GET
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        status_code: [200]
+      changed_when: true
+
+    - name: Clore l'installation
+      ansible.builtin.uri:
+        url: "{{ _centreon_central_install_base }}/steps/process/process_step9.php"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          send_statistics: "{{ 1 if centreon_central_send_statistics | bool else 0 }}"
+        headers:
+          Cookie: "{{ _centreon_central_session.cookies_string }}"
+        return_content: true
+      register: _centreon_central_step9
+      changed_when: true
+      failed_when: _centreon_central_step9.status != 200
+
+    - name: Confirmer que le fichier de configuration a bien été écrit
+      ansible.builtin.stat:
+        path: /etc/centreon/centreon.conf.php
+      register: _centreon_central_conf_after
+      failed_when: not _centreon_central_conf_after.stat.exists
+
+    - name: Démarrer les services de supervision
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - cbd
+        - gorgoned
+        - centreontrapd
+        - snmptrapd
+
+# Le répertoire de l'assistant reste accessible après l'installation et permet
+# de réinitialiser la plateforme depuis un navigateur. Il est retiré ici.
+# Le moteur et l'interface partagent deux clés de chiffrement, déposées dans
+# /etc/centreon-engine/engine-context.json. Le paquet crée ce fichier vide et
+# l'assistant ne le remplit pas : sans lui, toute génération de configuration
+# échoue sur une « erreur de cohérence » qui ne nomme pas la cause.
+#
+# Centreon livre un script pour cela. Il interroge l'interface de
+# programmation, ce qui suppose la plateforme installée et son compte
+# administrateur créé : il est donc lancé ici, après l'assistant.
+- name: Relever si les secrets du moteur sont déjà écrits
+  ansible.builtin.stat:
+    path: /etc/centreon-engine/engine-context.json
+  register: _centreon_central_secrets_moteur
+
+# Ce fichier n'est écrit nulle part lors d'une installation neuve : dans le code
+# de Centreon 25.10, seul le parcours de mise à jour appelle writeIfMissing(),
+# et l'assistant d'installation ne le déclenche pas. Le script livré,
+# bin/writeEngineSecrets.sh, ne comble pas ce manque : il sert à recopier les
+# secrets d'un central vers un collecteur distant, et la route qu'il interroge
+# se contente de lire ce même fichier, d'où l'erreur 500 tant qu'il est vide.
+#
+# Les deux tâches ci-dessous reproduisent donc writeIfMissing() à l'identique :
+# le secret applicatif de Symfony, et un sel tiré de 32 octets aléatoires.
+#
+# Le renvoi de groupe s'écrit '\1' avec une seule contre-oblique : le filtre
+# analyse cet argument lui-même, et YAML ne déséchappe rien ici. Écrire
+# '\\1' fait échouer le filtre sur un message qui accuse le motif.
+- name: Relever le secret applicatif de la plateforme
+  ansible.builtin.slurp:
+    src: /usr/share/centreon/.env
+  when: (_centreon_central_secrets_moteur.stat.size | default(0)) == 0
+  no_log: true
+  register: _centreon_central_env
+
+# Les propriétaire et droits posés par le paquet sont conservés : le serveur web
+# lit ce fichier par son appartenance au groupe centreon-engine.
+- name: Déposer les secrets partagés entre l'interface et le moteur
+  ansible.builtin.copy:
+    content: >-
+      {{
+        {
+          'app_secret': (
+            _centreon_central_env.content | b64decode
+            | regex_search('^APP_SECRET=(.*)$', '\1', multiline=True)
+            | first | trim | trim('"') | trim("'")
+          ),
+          'salt': lookup(
+            'ansible.builtin.password', '/dev/null',
+            chars=['digits', 'abcdef'], length=64
+          )
+        } | to_json
+      }}
+    dest: /etc/centreon-engine/engine-context.json
+    owner: centreon-engine
+    group: centreon-engine
+    mode: "0660"
+  when: (_centreon_central_secrets_moteur.stat.size | default(0)) == 0
+  no_log: true
+
+- name: Confirmer que les secrets du moteur sont exploitables
+  ansible.builtin.stat:
+    path: /etc/centreon-engine/engine-context.json
+  register: _centreon_central_secrets_apres
+  failed_when: (_centreon_central_secrets_apres.stat.size | default(0)) == 0
+
+- name: Confirmer l'état installé avant de retirer l'assistant
+  ansible.builtin.stat:
+    path: /etc/centreon/centreon.conf.php
+  register: _centreon_central_conf_final
+
+- name: Vérifier que les bases sont bien remplies avant de conclure
+  ansible.mysql.mysql_query:
+    login_unix_socket: "{{ centreon_central_db_socket }}"
+    query: >-
+      SELECT COUNT(*) AS total FROM information_schema.tables
+      WHERE table_schema IN ('{{ centreon_central_db_configuration }}',
+                             '{{ centreon_central_db_storage }}')
+  register: _centreon_central_tables_finales
+  failed_when: false
+  changed_when: false
+
+- name: Relever si le moteur dispose déjà d'une configuration
+  ansible.builtin.stat:
+    path: /etc/centreon-engine/conf.d/hosts.cfg
+  register: _centreon_central_moteur_configure
+
+# Ces services sont démarrés que l'assistant vienne de tourner ou que la
+# plateforme ait été installée auparavant : sans cela, une reprise laisse une
+# plateforme installée mais inerte.
+#
+# centengine est volontairement absent de la liste. Le moteur de supervision
+# ne démarre qu'une fois sa configuration générée, ce qui n'arrive qu'au
+# premier export depuis Centreon : avant cela, il n'a rien à superviser et
+# refuse de se lancer. C'est le rôle centreon_hosts qui déclenche cet export,
+# après avoir déclaré les hôtes.
+- name: Démarrer les services qui ne dépendent pas d'une configuration générée
+  when: _centreon_central_conf_final.stat.exists | default(false)
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - cbd
+    - gorgoned
+    - centreontrapd
+    - snmptrapd
+
+- name: Signaler que le moteur attend sa première configuration
+  when:
+    - _centreon_central_conf_final.stat.exists | default(false)
+    - not _centreon_central_moteur_configure.stat.exists | default(false)
+  ansible.builtin.debug:
+    msg: >-
+      Le moteur de supervision n'est pas démarré sur {{ inventory_hostname }},
+      et c'est normal : sa configuration n'a pas encore été générée. Elle le
+      sera au premier export, déclenché par playbooks/40-centreon-hosts.yml
+      une fois les hôtes déclarés. La plateforme est installée et son
+      interface répond, mais rien n'est encore supervisé.
+
+# Le répertoire n'est retiré qu'une fois l'installation prouvée complète :
+# fichier de configuration écrit ET bases remplies. Le retirer trop tôt rend
+# toute reprise impossible, l'assistant n'étant plus là.
+- name: Retirer le répertoire de l'assistant d'installation
+  when:
+    - _centreon_central_conf_final.stat.exists
+    - (_centreon_central_tables_finales.query_result[0][0].total | default(0) | int) > 100
+  ansible.builtin.file:
+    path: /usr/share/centreon/www/install
+    state: absent

@@ -1,0 +1,71 @@
+---
+- name: Installer le gestionnaire de dépôts
+  ansible.builtin.dnf:
+    name: dnf-plugins-core
+    state: present
+
+- name: Installer EPEL
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+
+# Les trois opérations qui suivent sont d'abord constatées avant d'être
+# appliquées. Une commande dnf déclarative reste modifiante la première fois :
+# la marquer d'office non modifiante masquerait un vrai changement, et la
+# marquer d'office modifiante rendrait le playbook impossible à rejouer sans
+# bruit. On regarde donc l'état réel.
+
+- name: Relever les dépôts déjà activés
+  ansible.builtin.command:
+    cmd: dnf repolist --enabled
+  register: _centreon_central_repolist
+  changed_when: false
+
+- name: Activer le dépôt des outils de compilation
+  when: _centreon_central_crb_repo not in _centreon_central_repolist.stdout
+  ansible.builtin.command:
+    cmd: "dnf config-manager --set-enabled {{ _centreon_central_crb_repo }}"
+  register: _centreon_central_crb
+  changed_when: _centreon_central_crb.rc == 0
+
+- name: Relever les flux de modules déjà activés
+  ansible.builtin.command:
+    cmd: dnf module list --enabled
+  register: _centreon_central_modules
+  changed_when: false
+  failed_when: false
+
+# Un « dnf module reset php » ferait basculer toute autre application PHP de
+# la machine. Il n'a lieu que si le flux voulu n'est pas déjà celui en place.
+- name: Sélectionner la version de PHP
+  when:
+    - centreon_central_manage_php_module | bool
+    - "'php ' ~ centreon_central_php_version not in _centreon_central_modules.stdout"
+  ansible.builtin.command:
+    cmd: "dnf -y module {{ item }}"
+  loop:
+    - reset php
+    - "install php:{{ centreon_central_php_version }}"
+  register: _centreon_central_php_module
+  changed_when: "'Nothing to do' not in _centreon_central_php_module.stdout"
+
+- name: Sélectionner la version de MariaDB
+  when: "'mariadb ' ~ centreon_central_mariadb_version not in _centreon_central_modules.stdout"
+  ansible.builtin.command:
+    cmd: "dnf -y module enable mariadb:{{ centreon_central_mariadb_version }}"
+  register: _centreon_central_mariadb_module
+  changed_when: "'Nothing to do' not in _centreon_central_mariadb_module.stdout"
+
+- name: Déclarer le dépôt Centreon
+  ansible.builtin.get_url:
+    url: "{{ centreon_central_repo_url }}"
+    dest: "/etc/yum.repos.d/centreon-{{ centreon_central_version }}.repo"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Vider le cache des depots
+
+# Les paquets sont installés juste après : le handler doit avoir joué avant,
+# sinon dnf travaillerait sur un cache qui ignore le dépôt Centreon.
+- name: Appliquer les changements de dépôts avant d'installer
+  ansible.builtin.meta: flush_handlers

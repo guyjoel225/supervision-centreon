@@ -1,0 +1,4 @@
+; {{ ansible_managed }}
+; Fuseau horaire de PHP. Sans ce réglage, l'assistant d'installation de
+; Centreon refuse de démarrer et les horodatages des graphiques dérivent.
+date.timezone = {{ centreon_central_php_timezone }}

@@ -1,0 +1,23 @@
+---
+# Nom du dépôt d'outils de compilation, qui a changé de nom entre EL8 et EL9.
+_centreon_central_crb_repo: >-
+  {{ 'powertools' if ansible_facts['distribution_major_version'] == '8' else 'crb' }}
+
+# URL de base de l'assistant d'installation web.
+_centreon_central_install_base: >-
+  {{ centreon_central_web_protocol }}://{{ ansible_host | default(inventory_hostname) }}:{{ centreon_central_web_port }}/centreon/install
+
+# Séquence exacte des scripts d'installation de la base, dans l'ordre imposé
+# par l'assistant. Cet ordre n'est pas arbitraire : chaque script consomme ce
+# que le précédent a écrit en session.
+_centreon_central_install_db_steps:
+  - configFileSetup.php
+  - installConfigurationDb.php
+  - installStorageDb.php
+  - createDbUser.php
+  - insertBaseConf.php
+  - partitionTables.php
+  - generationCache.php
+
+# Racine de l'interface de programmation, servie sous /centreon.
+_centreon_central_api_base: "{{ centreon_central_web_protocol }}://{{ ansible_host }}:{{ centreon_central_web_port }}/centreon/api/latest"

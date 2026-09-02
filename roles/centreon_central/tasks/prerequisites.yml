@@ -1,0 +1,44 @@
+---
+- name: Fixer le nom d'hôte
+  when: centreon_central_manage_hostname | bool
+  ansible.builtin.hostname:
+    name: "{{ centreon_central_hostname }}"
+
+- name: Lire l'état courant de SELinux
+  ansible.builtin.command: getenforce
+  register: _centreon_central_selinux_current
+  changed_when: false
+  failed_when: false
+
+- name: Appliquer l'état SELinux demandé
+  when: centreon_central_selinux_state in ['permissive', 'enforcing']
+  ansible.posix.selinux:
+    policy: targeted
+    state: "{{ centreon_central_selinux_state }}"
+  register: _centreon_central_selinux_applied
+
+- name: Désactiver complètement SELinux
+  when: centreon_central_selinux_state == 'disabled'
+  ansible.posix.selinux:
+    state: disabled
+  register: _centreon_central_selinux_disabled
+
+# Le passage à l'état « disabled » n'est effectif qu'après redémarrage. On le
+# signale plutôt que de redémarrer d'autorité : c'est une décision qui revient
+# à l'exploitant, pas au playbook.
+- name: Signaler qu'un redémarrage est nécessaire pour SELinux
+  when:
+    - centreon_central_selinux_state == 'disabled'
+    - _centreon_central_selinux_disabled is defined
+    - _centreon_central_selinux_disabled.reboot_required | default(false)
+  ansible.builtin.debug:
+    msg: >-
+      SELinux passera à l'état 'disabled' au prochain redémarrage de
+      {{ inventory_hostname }}. En attendant, il reste dans l'état
+      '{{ _centreon_central_selinux_current.stdout | default("inconnu") }}'.
+
+- name: Installer les langues supplémentaires de l'interface
+  when: centreon_central_langpacks | length > 0
+  ansible.builtin.dnf:
+    name: "{{ centreon_central_langpacks }}"
+    state: present

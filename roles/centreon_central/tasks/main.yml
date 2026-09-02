@@ -1,0 +1,104 @@
+---
+# Deux vérifications distinctes, et non une seule groupée : réunies, elles
+# produisaient un message qui parlait d'abord de la distribution alors que
+# c'était un mot de passe manquant qui avait échoué. Un message d'erreur qui
+# désigne la mauvaise cause fait perdre plus de temps que pas de message.
+
+- name: Vérifier que la machine peut recevoir un serveur central
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'RedHat'
+      - ansible_facts['distribution_major_version'] in ['8', '9']
+      - ansible_facts['architecture'] == 'x86_64'
+    fail_msg: >-
+      {{ inventory_hostname }} ne peut pas recevoir un serveur central.
+      Machine détectée : {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }} ({{ ansible_facts['architecture'] }}).
+      Centreon ne s'installe que sur Alma, RHEL ou Oracle Linux 8 et 9, ou sur
+      Debian 12, en x86_64. Ni Ubuntu ni Enterprise Linux 10 n'en font partie.
+    quiet: true
+
+- name: Vérifier que les secrets du central sont fournis
+  ansible.builtin.assert:
+    that:
+      - centreon_central_db_root_password | length > 0
+      - centreon_central_db_password | length > 0
+      - centreon_central_web_admin_password | length >= 12
+    fail_msg: >-
+      Les secrets du serveur central manquent dans le coffre. Trois valeurs
+      sont attendues : vault_centreon_db_root_password
+      ({{ 'fourni' if centreon_central_db_root_password | length > 0 else 'MANQUANT' }}),
+      vault_centreon_db_password
+      ({{ 'fourni' if centreon_central_db_password | length > 0 else 'MANQUANT' }}),
+      et vault_centreon_web_admin_password
+      ({{ 'trop court, ' ~ (centreon_central_web_admin_password | length) ~ ' caractères'
+          if centreon_central_web_admin_password | length > 0
+          else 'MANQUANT' }}).
+      Le mot de passe de l'administrateur doit faire au moins 12 caractères,
+      avec une majuscule, une minuscule, un chiffre et un caractère parmi
+      @$!%*?&, exigence de Centreon lui-même.
+      Les ajouter avec : ansible-vault edit
+      inventories/lab/group_vars/all/vault.yml
+    quiet: true
+
+- name: Contrôler l'état de la machine avant d'y toucher
+  ansible.builtin.include_tasks: preflight.yml
+  tags: [centreon_prereq, centreon_preflight]
+
+- name: Préparer le système
+  ansible.builtin.include_tasks: prerequisites.yml
+  tags: [centreon_prereq]
+
+- name: Déclarer les dépôts de paquets
+  ansible.builtin.include_tasks: repositories.yml
+  tags: [centreon_repos]
+
+# En simulation, la déclaration du dépôt Centreon n'est pas réellement
+# écrite : dnf ne trouve alors aucun paquet et tout ce qui suit échoue en
+# cascade. Une simulation ne peut donc rien prouver sur une installation
+# initiale, et le rôle s'arrête ici en le disant, plutôt que de produire une
+# erreur qui désigne les paquets alors que la cause est le mode d'exécution.
+- name: Expliquer pourquoi la simulation s'arrête ici
+  when:
+    - ansible_check_mode
+    - not _centreon_central_deja_installe.stat.exists
+  ansible.builtin.debug:
+    msg: >-
+      Simulation interrompue sur {{ inventory_hostname }} : le dépôt Centreon
+      n'a pas été réellement déclaré, puisque c'est justement ce que la
+      simulation évite de faire. Aucun paquet ne peut donc être trouvé, ni
+      rien de ce qui en dépend être évalué. Les étapes vérifiées jusqu'ici
+      restent valables : plateforme, secrets, machine dédiée, dépôts et
+      modules. Relancer sans --check pour aller plus loin.
+
+- name: Terminer la simulation pour cette machine
+  when:
+    - ansible_check_mode
+    - not _centreon_central_deja_installe.stat.exists
+  ansible.builtin.meta: end_host
+
+- name: Installer les paquets Centreon
+  ansible.builtin.include_tasks: packages.yml
+  tags: [centreon_packages]
+
+- name: Préparer la base de données
+  ansible.builtin.include_tasks: database.yml
+  tags: [centreon_database]
+
+- name: Activer les services
+  ansible.builtin.include_tasks: services.yml
+  tags: [centreon_services]
+
+- name: Ouvrir les flux dans le pare-feu
+  when: centreon_central_manage_firewall | bool
+  ansible.builtin.include_tasks: firewall.yml
+  tags: [centreon_firewall]
+
+- name: Dérouler l'assistant d'installation web
+  when: centreon_central_run_web_installer | bool
+  ansible.builtin.include_tasks: web_installer.yml
+  tags: [centreon_installer]
+
+- name: Installer les plugins de supervision
+  ansible.builtin.include_tasks: plugins.yml
+  tags: [centreon_plugins]

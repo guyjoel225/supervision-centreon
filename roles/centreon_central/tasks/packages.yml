@@ -1,0 +1,22 @@
+---
+- name: Installer Centreon et sa base locale
+  ansible.builtin.dnf:
+    name: "{{ centreon_central_packages }}"
+    state: present
+  register: _centreon_central_pkg
+  retries: 2
+  delay: 10
+  until: _centreon_central_pkg is succeeded
+  notify:
+    - Recharger les unites systemd
+    - Redemarrer php-fpm
+    - Redemarrer httpd
+
+- name: Fixer le fuseau horaire de PHP
+  ansible.builtin.template:
+    src: 50-centreon-timezone.ini.j2
+    dest: /etc/php.d/50-centreon-timezone.ini
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Redemarrer php-fpm

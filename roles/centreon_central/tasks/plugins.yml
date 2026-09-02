@@ -1,0 +1,22 @@
+---
+- name: Installer les plugins de supervision
+  ansible.builtin.dnf:
+    name: "{{ centreon_central_plugin_packages }}"
+    state: present
+  when: centreon_central_plugin_packages | length > 0
+
+- name: Vérifier que le plugin Linux SNMP est exécutable
+  ansible.builtin.stat:
+    path: /usr/lib/centreon/plugins/centreon_linux_snmp.pl
+  register: _centreon_central_linux_plugin
+
+- name: Refuser de continuer si le plugin Linux SNMP est absent
+  ansible.builtin.assert:
+    that:
+      - _centreon_central_linux_plugin.stat.exists
+      - _centreon_central_linux_plugin.stat.executable
+    fail_msg: >-
+      Le plugin /usr/lib/centreon/plugins/centreon_linux_snmp.pl est absent ou
+      non exécutable. Sans lui, les hôtes déclarés avec le modèle
+      OS-Linux-SNMP-custom remonteront en erreur.
+    quiet: true

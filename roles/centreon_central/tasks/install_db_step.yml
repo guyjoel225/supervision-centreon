@@ -1,0 +1,52 @@
+---
+# Une étape de la création de la base, appelée en boucle par web_installer.yml.
+#
+# Ce fichier existe pour que la boucle s'arrête à la première erreur : avec un
+# simple loop sur la tâche uri, Ansible parcourt toute la liste avant de
+# rapporter les échecs, si bien que les étapes suivantes tournaient sur une
+# base laissée à moitié construite. Une inclusion en échec, elle, interrompt
+# la boucle.
+
+- name: "Exécuter l'étape {{ _centreon_central_etape }}"
+  ansible.builtin.uri:
+    url: "{{ _centreon_central_install_base }}/steps/process/{{ _centreon_central_etape }}"
+    method: POST
+    body_format: form-urlencoded
+    body: {}
+    headers:
+      Cookie: "{{ _centreon_central_session.cookies_string }}"
+    return_content: true
+    timeout: 300
+    status_code: [200]
+  register: _centreon_central_db_etape
+  changed_when: true
+  failed_when: false
+
+- name: "Vérifier le résultat de l'étape {{ _centreon_central_etape }}"
+  vars:
+    _reponse: >-
+      {{ (_centreon_central_db_etape.content | from_json)
+         if _centreon_central_db_etape.status == 200
+            and (_centreon_central_db_etape.content | default('')) | length > 0
+         else {} }}
+  ansible.builtin.assert:
+    that:
+      - _centreon_central_db_etape.status == 200
+      - _reponse.result is defined
+      - _reponse.result | int == 0
+    fail_msg: >-
+      L'étape « {{ _centreon_central_etape }} » de la création de la base a
+      échoué.
+      {% if _centreon_central_db_etape.status == 500 %}
+      Le serveur a répondu 500, donc une erreur fatale de PHP, et n'a rien
+      renvoyé d'exploitable. La cause est dans les journaux de la machine :
+      lancer playbooks/91-diagnostic-installeur.yml pour les relever.
+      {% elif _reponse.msg is defined %}
+      Message renvoyé : {{ _reponse.msg }}
+      {% else %}
+      Code HTTP {{ _centreon_central_db_etape.status }}, réponse :
+      {{ _centreon_central_db_etape.content | default('vide') | truncate(300) }}
+      {% endif %}
+      Les étapes suivantes ne sont pas jouées : elles travailleraient sur une
+      base laissée incomplète.
+    quiet: true

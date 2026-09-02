@@ -1,0 +1,169 @@
+---
+# ===================================================================
+# Interface publique du rôle.
+#
+# Chaque variable est préfixée par le nom du rôle, comme l'exige la
+# convention Ansible. Les valeurs par défaut reprennent, quand elles
+# existent, les variables neutres définies dans l'inventaire : cela évite
+# de répéter la même information sous deux noms différents dans
+# group_vars, tout en gardant chaque rôle réutilisable isolément.
+# ===================================================================
+# ===================================================================
+# Version et dépôts
+# ===================================================================
+centreon_central_version: "{{ centreon_version | default('25.10') }}"
+centreon_central_repo_url: >-
+  https://packages.centreon.com/rpm-standard/{{ centreon_central_version }}/el{{
+  ansible_facts['distribution_major_version'] }}/centreon-{{ centreon_central_version }}.repo
+
+# Bascule le flux de module PHP de la machine vers la version attendue.
+#
+# Attention : un « dnf module reset php » fait basculer TOUTE application PHP
+# présente sur la machine vers le nouveau flux. Sur un serveur qui héberge
+# autre chose, cela peut casser cette autre application. Le rôle ne procède
+# désormais au basculement que si le flux voulu n'est pas déjà actif.
+centreon_central_manage_php_module: true
+centreon_central_php_version: "{{ centreon_php_version | default('8.2') }}"
+centreon_central_mariadb_version: "{{ centreon_mariadb_version | default('10.11') }}"
+
+# Paquets installés. centreon-mariadb pose la base locale et le réglage
+# my.cnf attendu par l'assistant ; centreon est le méta-paquet.
+centreon_central_packages:
+  - centreon-mariadb
+  - centreon
+
+# Langues supplémentaires de l'interface. Vide pour n'installer que l'anglais.
+centreon_central_langpacks:
+  - glibc-langpack-fr
+
+# ===================================================================
+# Système
+# ===================================================================
+# Centreon documente une installation SELinux désactivé. 'permissive' laisse
+# les journaux d'audit remonter sans bloquer, ce qui est préférable pour
+# préparer un futur passage en enforcing avec une politique dédiée.
+# Valeurs acceptées : disabled, permissive, enforcing.
+centreon_central_selinux_state: "{{ centreon_selinux_state | default('permissive') }}"
+
+# Change le nom d'hôte de la machine.
+#
+# Laissé à false : renommer un serveur en service casse les certificats qui
+# portent son nom, les licences qui s'y rattachent, l'agrégation de ses
+# journaux et parfois son authentification. Centreon n'a pas besoin de ce
+# renommage pour fonctionner, son collecteur portant un nom qui lui est propre.
+# Autorise l'installation sur une machine qui fait déjà tourner un service web
+# ou une base de données.
+#
+# Laissé à false : le rôle abaisse SELinux, bascule le flux PHP de la machine
+# entière, durcit la base en supprimant des comptes, et redémarre httpd,
+# php-fpm et mariadb. Sur un serveur partagé, chacune de ces actions peut
+# interrompre ce qui tourne déjà. Centreon prévoit une machine dédiée.
+centreon_central_allow_shared_host: false
+
+centreon_central_manage_hostname: false
+centreon_central_hostname: "{{ inventory_hostname }}"
+centreon_central_php_timezone: "{{ common_timezone | default('UTC') }}"
+
+# Le central expose l'interface web et reçoit les traps SNMP.
+centreon_central_manage_firewall: "{{ centreon_manage_firewall | default(true) }}"
+centreon_central_firewall_ports:
+  - { port: 80, proto: tcp, comment: "Interface web Centreon" }
+  - { port: 443, proto: tcp, comment: "Interface web Centreon en TLS" }
+  - { port: 162, proto: udp, comment: "Réception des traps SNMP" }
+  - { port: 5556, proto: tcp, comment: "Flux Centreon Broker entre collecteurs" }
+
+# ===================================================================
+# Base de données
+# ===================================================================
+# Socket Unix de MariaDB. Sur Enterprise Linux, le paquet le place dans
+# /var/lib/mysql ; d'autres distributions le mettent dans /run/mysqld.
+centreon_central_db_socket: /var/lib/mysql/mysql.sock
+
+centreon_central_db_host: localhost
+centreon_central_db_port: 3306
+# Compte employé par l'assistant d'installation pour créer les bases.
+#
+# Ce n'est volontairement pas root : MariaDB installe root@localhost avec
+# unix_socket en plus du mot de passe, et seul le compte système root
+# satisfait cette méthode. L'assistant, qui tourne sous php-fpm, se verrait
+# refuser l'accès. Un compte dédié n'a qu'une méthode d'authentification et
+# fonctionne depuis n'importe quel compte système.
+#
+# Il conserve tous ses droits après l'installation, car les montées de
+# version de Centreon en ont besoin.
+centreon_central_db_admin_user: centreon_install
+centreon_central_db_admin_password: "{{ centreon_db_root_password | default('') }}"
+
+# Compte système sous lequel tourne l'interface web, donc l'assistant.
+centreon_central_web_user: apache
+
+centreon_central_db_root_user: root
+centreon_central_db_root_password: "{{ centreon_db_root_password | default('') }}"        # obligatoire, à fournir par le coffre
+centreon_central_db_user: centreon
+centreon_central_db_password: "{{ centreon_db_password | default('') }}"             # obligatoire, à fournir par le coffre
+centreon_central_db_configuration: centreon
+centreon_central_db_storage: centreon_storage
+
+# Applique l'équivalent de mariadb-secure-installation, de façon idempotente.
+centreon_central_db_harden: true
+
+# ===================================================================
+# Assistant d'installation web
+# ===================================================================
+# Détruit les bases de Centreon pour repartir d'une installation propre.
+#
+# Laissé à false. N'a de sens que sur une installation qui ne s'est jamais
+# terminée : les bases y sont incomplètes et sans valeur. Sur une plateforme
+# en service, cette option détruirait la configuration et l'historique.
+centreon_central_reset_incomplete_install: false
+
+centreon_central_run_web_installer: "{{ centreon_run_web_installer | default(true) }}"
+centreon_central_web_protocol: "{{ centreon_web_protocol | default('http') }}"
+centreon_central_web_port: "{{ centreon_web_port | default(80) }}"
+
+centreon_central_web_admin_login: "{{ centreon_web_admin_login | default('admin') }}"
+# Contrainte imposée par Centreon : au moins 12 caractères, avec au moins
+# une majuscule, une minuscule, un chiffre et un caractère parmi @$!%*?&
+centreon_central_web_admin_password: "{{ centreon_web_admin_password | default('') }}"      # obligatoire, à fournir par le coffre
+centreon_central_web_admin_firstname: "{{ centreon_web_admin_firstname | default('Admin') }}"
+centreon_central_web_admin_lastname: "{{ centreon_web_admin_lastname | default('Centreon') }}"
+centreon_central_web_admin_email: "{{ centreon_web_admin_email | default('admin@example.local') }}"
+
+# Envoi de statistiques d'usage à l'éditeur.
+centreon_central_send_statistics: "{{ centreon_send_statistics | default(false) }}"
+
+# Surcharges des chemins proposés par l'assistant d'installation.
+#
+# Vides par défaut, et c'est voulu : les chemins et jusqu'aux paramètres
+# eux-mêmes changent d'une version de Centreon à l'autre. Le rôle les lit
+# donc dans les fichiers de définition que Centreon installe, plutôt que de
+# parier sur une version. Ne renseigner ici que ce qui doit s'écarter des
+# valeurs livrées, sur une installation atypique.
+#
+# Exemple :
+#   centreon_central_engine_parameters:
+#     centreonplugins: /opt/plugins/
+centreon_central_engine_parameters: {}
+centreon_central_broker_parameters: {}
+
+# ===================================================================
+# Plugins de supervision installés sur le central
+# ===================================================================
+centreon_central_plugin_packages:
+  - centreon-plugin-Operatingsystems-Linux-Snmp
+  - centreon-plugin-Applications-Protocol-Http
+
+# ===================================================================
+# Services gérés
+# ===================================================================
+centreon_central_services:
+  - php-fpm
+  - httpd
+  - centreon
+  - cbd
+  - centengine
+  - gorgoned
+  - snmptrapd
+  - centreontrapd
+  - snmpd
+  - crond
