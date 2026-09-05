@@ -1,0 +1,215 @@
+---
+# ===================================================================
+# Retrait de l'agent SNMP, et retour de l'hôte à son état antérieur.
+#
+# Ces tâches vivent dans le rôle et non dans le playbook, afin que les
+# valeurs par défaut et les variables internes du rôle soient chargées :
+# le chemin du fichier persistant de net-snmp et la liste des paquets en
+# font partie, et un playbook autonome ne les aurait jamais définies.
+#
+# Appelé par playbooks/70-retirer-agent-snmp.yml.
+# ===================================================================
+
+- name: Refuser de désuperviser tout un parc d'un seul coup
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts_all | length < (groups['monitored'] | default([]) | length)
+    fail_msg: >-
+      Ce playbook porte sur {{ ansible_play_hosts_all | length }} hôtes,
+      soit la totalité du parc supervisé. Un retrait se fait machine par
+      machine, en le désignant : relancer avec
+      « make retirer-agent LIMIT=<hôte> ».
+    success_msg: >-
+      Retrait limité à : {{ ansible_play_hosts_all | join(', ') }}.
+    quiet: true
+  run_once: true
+
+- name: Exiger une confirmation explicite
+  ansible.builtin.assert:
+    that:
+      - snmp_agent_confirmer_retrait | bool
+    fail_msg: >-
+      Le retrait n'a pas été confirmé. Il arrêtera l'agent SNMP de
+      {{ inventory_hostname }} et remettra sa configuration antérieure :
+      la collecte de cette machine s'interrompra, et Centreon la verra
+      passer en erreur tant qu'elle y restera déclarée. Relancer avec
+      OPTS="-e snmp_agent_confirmer_retrait=true".
+    quiet: true
+
+
+# ------------------------------------------------------------------
+# État avant, pour pouvoir comparer après
+# ------------------------------------------------------------------
+
+- name: Relever l'état de l'agent avant retrait
+  ansible.builtin.systemd_service:
+    name: snmpd
+  register: _snmp_agent_retrait_avant
+  failed_when: false
+  check_mode: false
+
+- name: Chercher une configuration SNMP antérieure sauvegardée par le rôle
+  ansible.builtin.find:
+    paths: /etc/snmp
+    patterns: "snmpd.conf.*~"
+    recurse: false
+  register: _snmp_agent_retrait_sauvegardes
+  check_mode: false
+
+- name: Retenir la sauvegarde la plus récente
+  ansible.builtin.set_fact:
+    _snmp_agent_retrait_sauvegarde: >-
+      {{ (_snmp_agent_retrait_sauvegardes.files | default([])
+          | sort(attribute='mtime') | last | default({})).path | default('') }}
+
+# ------------------------------------------------------------------
+# Arrêt du service
+# ------------------------------------------------------------------
+
+- name: Arrêter et désactiver l'agent SNMP
+  ansible.builtin.systemd_service:
+    name: snmpd
+    state: stopped
+    enabled: false
+  failed_when: false
+
+# ------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------
+
+- name: Restaurer la configuration SNMP antérieure
+  when: _snmp_agent_retrait_sauvegarde | length > 0
+  ansible.builtin.copy:
+    src: "{{ _snmp_agent_retrait_sauvegarde }}"
+    dest: /etc/snmp/snmpd.conf
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+# Quand aucune sauvegarde n'existe, c'est que la machine n'avait pas de
+# configuration SNMP avant le déploiement. La retirer la remet donc bien
+# dans son état antérieur, et le paquet en réinstallera une par défaut
+# s'il est un jour reconfiguré.
+- name: Retirer la configuration posée par le rôle, faute de sauvegarde
+  when: _snmp_agent_retrait_sauvegarde | length == 0
+  ansible.builtin.file:
+    path: /etc/snmp/snmpd.conf
+    state: absent
+
+# L'utilisateur v3 vit dans le fichier persistant de net-snmp, que le
+# démon réécrit à son arrêt. Le laisser reviendrait à conserver un compte
+# d'accès sur une machine qui n'est plus supervisée.
+- name: Retirer l'utilisateur SNMP v3 du fichier persistant
+  ansible.builtin.lineinfile:
+    path: "{{ _snmp_agent_persistent_conf }}"
+    regexp: "^usmUser .*{{ snmp_agent_v3_user | regex_escape }}"
+    state: absent
+  failed_when: false
+
+- name: Retirer la déclaration de création de l'utilisateur
+  ansible.builtin.lineinfile:
+    path: "{{ _snmp_agent_persistent_conf }}"
+    regexp: "^createUser .*{{ snmp_agent_v3_user | regex_escape }}"
+    state: absent
+  failed_when: false
+
+# ------------------------------------------------------------------
+# Pare-feu
+# ------------------------------------------------------------------
+
+- name: Relever l'état de firewalld
+  ansible.builtin.systemd_service:
+    name: firewalld
+  register: _snmp_agent_retrait_firewalld
+  failed_when: false
+  check_mode: false
+
+- name: Relever l'état de ufw
+  ansible.builtin.command:
+    cmd: ufw status
+  register: _snmp_agent_retrait_ufw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Retirer les autorisations SNMP posées dans firewalld
+  when: (_snmp_agent_retrait_firewalld.status | default({})).get('ActiveState', '') == 'active'
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family="ipv4"
+      source address="{{ item }}"
+      port port="{{ snmp_agent_port }}" protocol="udp"
+      accept
+    permanent: true
+    immediate: true
+    state: disabled
+  loop: "{{ snmp_agent_allowed_managers | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  failed_when: false
+
+- name: Retirer les autorisations SNMP posées dans ufw
+  when: "'Status: active' in (_snmp_agent_retrait_ufw.stdout | default(''))"
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    port: "{{ snmp_agent_port }}"
+    proto: udp
+    delete: true
+  loop: "{{ snmp_agent_allowed_managers | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  failed_when: false
+
+# ------------------------------------------------------------------
+# Paquets, sur demande seulement
+# ------------------------------------------------------------------
+
+- name: Désinstaller les paquets net-snmp
+  when: snmp_agent_retirer_paquets | bool
+  ansible.builtin.package:
+    name: "{{ _snmp_agent_packages }}"
+    state: absent
+
+# ------------------------------------------------------------------
+# Preuve
+# ------------------------------------------------------------------
+
+- name: Vérifier que plus rien n'écoute sur le port SNMP
+  ansible.builtin.shell:
+    cmd: set -o pipefail && ss -lnup | grep ':{{ snmp_agent_port }}' || true
+    executable: /bin/bash
+  register: _snmp_agent_retrait_ecoute
+  changed_when: false
+  check_mode: false
+
+- name: Confirmer que l'hôte est revenu à son état antérieur
+  ansible.builtin.assert:
+    that:
+      - _snmp_agent_retrait_ecoute.stdout | trim | length == 0
+    fail_msg: >-
+      Quelque chose écoute encore sur le port {{ snmp_agent_port }} de
+      {{ inventory_hostname }} : {{ _snmp_agent_retrait_ecoute.stdout | trim }}.
+      Le retrait n'est pas complet.
+    success_msg: >-
+      {{ inventory_hostname }} ne répond plus en SNMP.
+      {{ 'Sa configuration antérieure a été restaurée depuis '
+         ~ _snmp_agent_retrait_sauvegarde ~ '.'
+         if _snmp_agent_retrait_sauvegarde | length > 0
+         else 'Aucune configuration SNMP n existait avant le déploiement : celle du rôle a été retirée.' }}
+      {{ 'Les paquets net-snmp ont été désinstallés.'
+         if snmp_agent_retirer_paquets | bool
+         else 'Les paquets net-snmp restent installés, ce qui n expose rien tant que le service est arrêté et désactivé.' }}
+    quiet: true
+
+- name: Rappeler ce que ce playbook ne fait pas
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} reste déclaré dans Centreon, qui continuera
+      de l'interroger et le verra passer en erreur. Le retirer de la
+      supervision se fait dans l'interface, Configuration puis Hôtes, en
+      le supprimant ou en le désactivant, puis en exportant la
+      configuration du collecteur. Ce playbook ne le fait pas : supprimer
+      un hôte efface aussi son historique de métriques, ce qui ne doit pas
+      se décider depuis une ligne de commande.

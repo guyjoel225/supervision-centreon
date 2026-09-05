@@ -107,3 +107,17 @@ snmp_agent_replace_foreign_config: false
 # Journalisation de l'agent. 'd' pour syslog daemon, sans les requêtes
 # détaillées qui saturent inutilement les journaux.
 snmp_agent_log_options: "-LSwd"
+
+# ===================================================================
+# Retrait de l'agent
+# ===================================================================
+
+# Confirmation exigée par playbooks/70-retirer-agent-snmp.yml. Le retrait
+# arrête la collecte de la machine et la fait passer en erreur dans Centreon :
+# il ne doit pas pouvoir résulter d'une commande tapée de mémoire.
+snmp_agent_confirmer_retrait: false
+
+# Les paquets ne sont pas désinstallés par défaut : ils étaient peut-être
+# présents avant le déploiement, et les retirer emporterait aussi les outils
+# SNMP dont l'exploitant se sert peut-être.
+snmp_agent_retirer_paquets: false

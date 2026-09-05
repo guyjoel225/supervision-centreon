@@ -1,0 +1,29 @@
+---
+# ===================================================================
+# Retire l'agent SNMP d'un hôte et le remet dans l'état où il était.
+#
+# Sert quand une machine sort du périmètre de supervision, quand un
+# déploiement a été fait sur la mauvaise machine, ou pour rendre un serveur
+# à son exploitant tel qu'il l'avait confié.
+#
+# C'est une opération destructive : elle arrête un service et retire une
+# configuration. Deux garde-fous l'encadrent, dans le rôle : une limite est
+# obligatoire, et une confirmation explicite est exigée.
+#
+# Le principe : restaurer plutôt que supprimer. Si le rôle avait trouvé une
+# configuration SNMP en place, il l'a sauvegardée avant de la remplacer ;
+# c'est cette sauvegarde qui est remise, et non un fichier vide.
+#
+# Usage : make retirer-agent LIMIT=<hôte> OPTS="-e snmp_agent_confirmer_retrait=true"
+# ===================================================================
+
+- name: Retirer l'agent SNMP et remettre l'hôte dans son état antérieur
+  hosts: monitored
+  become: true
+  gather_facts: true
+  tasks:
+
+    - name: Dérouler le retrait, avec les variables du rôle
+      ansible.builtin.include_role:
+        name: snmp_agent
+        tasks_from: retrait.yml
