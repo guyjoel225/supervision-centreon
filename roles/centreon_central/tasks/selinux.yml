@@ -1,0 +1,168 @@
+---
+# ===================================================================
+# Passe SELinux en enforcing sur le serveur central.
+#
+# Deuxième des cinq points qui séparaient cette plateforme d'une véritable
+# mise en production. Centreon documente une installation SELinux désactivé,
+# et beaucoup s'y arrêtent : la machine qui supervise tout le parc est alors
+# la moins protégée de ce parc, alors qu'elle détient les identifiants
+# d'accès à toutes les autres.
+#
+# L'ordre compte. L'installation se déroule en permissive, où les refus sont
+# journalisés sans bloquer, et le durcissement n'intervient qu'une fois la
+# plateforme en état de marche. Durcir avant reviendrait à diagnostiquer deux
+# problèmes à la fois.
+#
+# Un garde-fou termine ce fichier : si des refus apparaissent une fois la
+# plateforme redémarrée en enforcing, le rôle revient en permissive et le
+# signale. Une plateforme de supervision muette est un incident plus grave
+# qu'une politique SELinux non appliquée, et le choix ne doit pas se faire en
+# silence.
+# ===================================================================
+
+- name: Relever les politiques SELinux publiées par Centreon
+  ansible.builtin.command:
+    cmd: dnf --quiet repoquery --available --qf "%{name}" "centreon-*-selinux"
+  register: _centreon_central_politiques_disponibles
+  changed_when: false
+  failed_when: false
+
+- name: Installer les politiques SELinux de Centreon
+  when: _centreon_central_politiques_disponibles.stdout_lines | default([]) | length > 0
+  ansible.builtin.dnf:
+    name: "{{ _centreon_central_politiques_disponibles.stdout_lines | unique }}"
+    state: present
+  register: _centreon_central_politiques_installees
+
+- name: Signaler l'absence de politique SELinux publiée
+  when: _centreon_central_politiques_disponibles.stdout_lines | default([]) | length == 0
+  ansible.builtin.debug:
+    msg: >-
+      Aucune politique SELinux n'est publiée par les dépôts Centreon pour cette
+      version. Le passage en enforcing reposera sur la seule politique ciblée du
+      système, ce qui est plus exposé aux refus. Les refus éventuels sont relevés
+      plus bas et, s'il y en a, la machine revient en permissive.
+
+# Les booléens sont posés avant le changement d'état : les poser après
+# laisserait une fenêtre pendant laquelle la plateforme tourne en enforcing
+# sans les autorisations dont elle a besoin.
+- name: Autoriser ce dont la plateforme a besoin
+  ansible.posix.seboolean:
+    name: "{{ item }}"
+    state: true
+    persistent: true
+  loop: "{{ centreon_central_selinux_booleans }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _centreon_central_booleens
+  failed_when:
+    - _centreon_central_booleens is failed
+    - "'Failed to find' not in (_centreon_central_booleens.msg | default(''))"
+
+- name: Noter l'instant du durcissement
+  ansible.builtin.command:
+    cmd: date "+%m/%d/%Y %H:%M:%S"
+  register: _centreon_central_instant_durcissement
+  changed_when: false
+
+- name: Appliquer l'état SELinux cible
+  ansible.posix.selinux:
+    policy: targeted
+    state: "{{ centreon_central_selinux_state }}"
+  register: _centreon_central_selinux_cible
+
+- name: Redémarrer la plateforme sous la politique appliquée
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: restarted
+  loop: "{{ centreon_central_selinux_services_a_relancer }}"
+  loop_control:
+    label: "{{ item }}"
+
+# Un service peut démarrer puis s'écrouler au premier travail périodique. Le
+# relevé des refus attend donc que la plateforme ait réellement fonctionné, et
+# non qu'elle ait seulement démarré.
+- name: Laisser la plateforme fonctionner avant de juger
+  ansible.builtin.wait_for:
+    timeout: "{{ centreon_central_selinux_delai_observation }}"
+
+- name: Relever les refus survenus depuis le durcissement
+  ansible.builtin.command:
+    cmd: >-
+      ausearch --message AVC --start {{ _centreon_central_instant_durcissement.stdout }}
+      --raw
+  register: _centreon_central_refus
+  changed_when: false
+  failed_when: false
+
+- name: Établir la liste des composants auxquels un accès a été refusé
+  ansible.builtin.set_fact:
+    _centreon_central_refus_composants: >-
+      {{ (_centreon_central_refus.stdout | default(''))
+         | regex_findall('comm="([^"]+)"') | unique | sort }}
+
+- name: Vérifier que l'interface répond toujours sous la politique appliquée
+  ansible.builtin.uri:
+    url: "{{ centreon_central_web_protocol }}://{{ ansible_host }}:{{ centreon_central_web_port }}/centreon/"
+    validate_certs: "{{ centreon_central_web_validate_certs }}"
+    method: GET
+    status_code: [200, 302, 401]
+    timeout: 20
+  register: _centreon_central_reponse_durcie
+  retries: 5
+  delay: 5
+  until: _centreon_central_reponse_durcie is succeeded
+  failed_when: false
+
+# ------------------------------------------------------------------
+# Garde-fou
+# ------------------------------------------------------------------
+
+- name: Revenir en permissive si le durcissement a cassé quelque chose
+  when:
+    - centreon_central_selinux_state == 'enforcing'
+    - centreon_central_selinux_revenir_si_refus | bool
+    - >-
+      _centreon_central_refus_composants | length > 0
+      or _centreon_central_reponse_durcie is failed
+  block:
+
+    - name: Rétablir l'état permissive
+      ansible.posix.selinux:
+        policy: targeted
+        state: permissive
+
+    - name: Relancer la plateforme sous la politique rétablie
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: restarted
+      loop: "{{ centreon_central_selinux_services_a_relancer }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Dire pourquoi la machine n'est pas restée en enforcing
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} est revenue en permissive. Motif :
+          {{ 'accès refusés à ' ~ (_centreon_central_refus_composants | join(', '))
+             if _centreon_central_refus_composants | length > 0
+             else 'l interface web ne répondait plus' }}.
+          La supervision continue de fonctionner et les refus restent
+          journalisés. Pour aller au bout, produire une politique locale à
+          partir de ces refus avec « ausearch -m AVC | audit2allow -M
+          centreon-local », l'examiner ligne à ligne, puis relancer ce rôle.
+          Ne pas se contenter d'appliquer ce qu'audit2allow propose : il
+          autorise ce qui a été refusé, y compris ce qui devait l'être.
+
+- name: Confirmer l'état SELinux effectif
+  when: >-
+    not (centreon_central_selinux_state == 'enforcing'
+         and centreon_central_selinux_revenir_si_refus | bool
+         and (_centreon_central_refus_composants | length > 0
+              or _centreon_central_reponse_durcie is failed))
+  ansible.builtin.debug:
+    msg: >-
+      SELinux est en {{ centreon_central_selinux_state }} sur
+      {{ inventory_hostname }}, la plateforme a été relancée sous cette
+      politique et l'interface répond. Aucun accès refusé relevé pendant les
+      {{ centreon_central_selinux_delai_observation }} secondes d'observation.
