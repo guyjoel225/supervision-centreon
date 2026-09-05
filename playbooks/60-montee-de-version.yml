@@ -1,0 +1,196 @@
+---
+# ===================================================================
+# Montée de version du serveur central Centreon.
+#
+# Cinquième et dernier des points qui séparaient cette plateforme d'une
+# véritable mise en production : aucune procédure de mise à jour n'était
+# écrite, ce qui revient à découvrir la marche à suivre le jour où une faille
+# impose de l'appliquer vite.
+#
+# Ce playbook automatise ce qui peut l'être sans risque et s'arrête devant ce
+# qui n'en relève pas. Il ne déroule pas l'assistant de migration de la base :
+# celui-ci transforme des données irremplaçables, son déroulement varie d'une
+# version à l'autre, et le faire jouer à l'aveugle par un automate est
+# exactement le genre de raccourci qui coûte une plateforme. Le playbook
+# prépare tout, vérifie tout, et dit où reprendre à la main.
+#
+# Usage : make upgrade
+#         make upgrade OPTS="-e centreon_upgrade_apply=true"
+# ===================================================================
+
+- name: Préparer et contrôler la montée de version du serveur central
+  hosts: centreon_central
+  become: true
+  gather_facts: true
+
+  vars:
+    # Sans cette variable, le playbook ne fait que constater : il relève les
+    # versions, éprouve la sauvegarde et s'arrête. Rien n'est mis à jour.
+    centreon_upgrade_apply: false
+    centreon_upgrade_paquets: "centreon*"
+
+  tasks:
+
+    # ------------------------------------------------------------------
+    # Constat
+    # ------------------------------------------------------------------
+
+    - name: Relever les paquets installés
+      ansible.builtin.package_facts:
+        manager: rpm
+
+    - name: Retenir la version de l'interface en place
+      ansible.builtin.set_fact:
+        _upgrade_version_installee: >-
+          {{ (ansible_facts.packages['centreon-web'] | default([{}]) | first).version
+             | default('inconnue') }}
+
+    - name: Relever la version disponible dans les dépôts
+      ansible.builtin.command:
+        cmd: dnf --quiet repoquery --available --queryformat "%{version}-%{release}" centreon-web
+      register: _upgrade_version_disponible
+      changed_when: false
+      failed_when: false
+
+    - name: Présenter l'écart de version
+      ansible.builtin.debug:
+        msg:
+          - "installée  : {{ _upgrade_version_installee }}"
+          - "disponible : {{ (_upgrade_version_disponible.stdout_lines | default([]) | last) | default('aucune') }}"
+
+    # ------------------------------------------------------------------
+    # Sauvegarde, condition de toute suite
+    # ------------------------------------------------------------------
+
+    # Règle posée après la perte des données de démonstration du CMP le
+    # 30/08/2026 : sauvegarder avant toute opération susceptible de détruire
+    # ce qui ne l'est pas encore. Ici, la sauvegarde n'est pas une précaution,
+    # c'est la condition d'exécution.
+    - name: Exécuter une sauvegarde immédiatement avant la mise à jour
+      ansible.builtin.command:
+        cmd: /usr/local/sbin/centreon-backup
+      register: _upgrade_sauvegarde
+      changed_when: _upgrade_sauvegarde.rc == 0
+
+    - name: Relever ce que cette sauvegarde a produit
+      ansible.builtin.slurp:
+        src: /var/lib/centreon-backup.state
+      register: _upgrade_etat_sauvegarde
+
+    - name: Établir l'emplacement et l'âge de la sauvegarde
+      ansible.builtin.set_fact:
+        _upgrade_chemin_sauvegarde: >-
+          {{ (_upgrade_etat_sauvegarde.content | b64decode)
+             | regex_search('^chemin=(.*)$', '\1', multiline=True) | first | trim }}
+        _upgrade_epoch_sauvegarde: >-
+          {{ (_upgrade_etat_sauvegarde.content | b64decode)
+             | regex_search('^epoch=(.*)$', '\1', multiline=True) | first | trim }}
+
+    - name: Vérifier les empreintes de la sauvegarde
+      ansible.builtin.command:
+        cmd: sha256sum --check --quiet SHA256SUMS
+        chdir: "{{ _upgrade_chemin_sauvegarde }}"
+      register: _upgrade_empreintes
+      changed_when: false
+
+    # Une sauvegarde vieille de plusieurs heures n'est pas celle de l'état que
+    # l'on s'apprête à modifier : elle ferait perdre tout ce qui a été mesuré
+    # entre-temps si la restauration devenait nécessaire.
+    - name: Refuser de continuer sans une sauvegarde fraîche et vérifiée
+      ansible.builtin.assert:
+        that:
+          - _upgrade_empreintes.rc == 0
+          - (ansible_date_time.epoch | int) - (_upgrade_epoch_sauvegarde | int) < 900
+        fail_msg: >-
+          La sauvegarde n'est pas exploitable ou date de plus de quinze
+          minutes. La montée de version s'arrête ici : sans point de retour
+          vérifié, une migration ratée serait définitive.
+        success_msg: >-
+          Sauvegarde vérifiée à l'instant dans {{ _upgrade_chemin_sauvegarde }}.
+          C'est le point de retour en cas de migration ratée.
+        quiet: true
+
+    # ------------------------------------------------------------------
+    # Mise à jour
+    # ------------------------------------------------------------------
+
+    - name: Annoncer que rien ne sera modifié
+      when: not (centreon_upgrade_apply | bool)
+      ansible.builtin.debug:
+        msg: >-
+          Constat terminé, rien n'a été modifié. La sauvegarde a été prise et
+          vérifiée. Pour appliquer réellement la mise à jour, relancer avec
+          -e centreon_upgrade_apply=true, après avoir lu
+          docs/montee-de-version.md : l'étape de migration de la base reste
+          manuelle et son ordre compte.
+
+    - name: Appliquer la mise à jour
+      when: centreon_upgrade_apply | bool
+      block:
+
+        # Le moteur et le collecteur sont arrêtés avant la mise à jour des
+        # paquets : les laisser tourner pendant le remplacement de leurs
+        # binaires produit des pannes que personne ne sait ensuite rattacher
+        # à cette cause.
+        - name: Arrêter la collecte le temps de la mise à jour
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: stopped
+          loop: [centengine, gorgoned, cbd]
+          loop_control:
+            label: "{{ item }}"
+
+        - name: Mettre à jour les paquets Centreon
+          ansible.builtin.dnf:
+            name: "{{ centreon_upgrade_paquets }}"
+            state: latest       # noqa package-latest
+          register: _upgrade_paquets
+
+        - name: Relever les paquets après mise à jour
+          ansible.builtin.package_facts:
+            manager: rpm
+
+        - name: Retenir la version de l'interface après mise à jour
+          ansible.builtin.set_fact:
+            _upgrade_version_apres: >-
+              {{ (ansible_facts.packages['centreon-web'] | default([{}]) | first).version
+                 | default('inconnue') }}
+
+        - name: Redémarrer la plateforme
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: restarted
+          loop: [php-fpm, httpd, cbd, gorgoned]
+          loop_control:
+            label: "{{ item }}"
+
+        - name: Vérifier que l'interface répond après la mise à jour
+          ansible.builtin.uri:
+            url: "{{ centreon_web_protocol | default('https') }}://{{ ansible_host }}:{{ centreon_web_port | default(443) }}/centreon/"
+            validate_certs: "{{ centreon_web_validate_certs | default((centreon_web_tls_certificate | default('')) | length > 0) }}"
+            method: GET
+            status_code: [200, 302, 401]
+            timeout: 30
+          register: _upgrade_reponse
+          retries: 10
+          delay: 6
+          until: _upgrade_reponse is succeeded
+
+        # Le moteur n'est volontairement pas redémarré ici : sa configuration
+        # doit d'abord être régénérée par la plateforme mise à jour. Le
+        # relancer avant produirait des contrôles sur une configuration
+        # périmée, ce qui est pire qu'une collecte interrompue et visible.
+        - name: Dire où reprendre à la main
+          ansible.builtin.debug:
+            msg: >-
+              Paquets mis à jour :
+              {{ _upgrade_version_installee }} ->
+              {{ _upgrade_version_apres }}. L'interface répond.
+              Trois étapes restent manuelles et leur ordre compte. Ouvrir
+              l'interface, dérouler l'assistant de migration qu'elle propose,
+              qui transforme la base. Puis, dans Configuration puis Pollers,
+              exporter la configuration et relancer le moteur. Enfin, lancer
+              « make verify » pour prouver que la collecte a repris. En cas
+              d'échec de la migration, le point de retour est
+              {{ _upgrade_chemin_sauvegarde }} et la procédure de restauration
+              est dans docs/montee-de-version.md.
