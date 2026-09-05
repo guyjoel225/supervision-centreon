@@ -237,10 +237,13 @@ vérifié sur la plateforme réelle. Le rôle reprend le corps de l'hôte virtue
 que Centreon déclare sur le port 80 plutôt que de le réécrire, faute de quoi
 le canal chiffré répondrait par une erreur 404. Réserve : sans certificat
 fourni par l'exploitant, celui produit est auto-signé, et chiffre le transport
-sans authentifier le serveur.
+sans authentifier le serveur. Fournir le certificat de l'entreprise lève cette
+réserve et active la validation à tous les appels : la procédure est dans
+[docs/exploitation.md](docs/exploitation.md).
 
 SELinux passe en `enforcing` une fois la plateforme en marche, politiques
-Centreon installées et booléens posés. Réserve : si des accès sont refusés ou
+Centreon installées et booléens posés. Vérifié sur la plateforme réelle :
+aucun accès refusé pendant les soixante secondes d'observation. Réserve : si des accès sont refusés ou
 si l'interface cesse de répondre, le rôle revient en `permissive` et le dit.
 Une supervision aveugle est un incident plus grave qu'une politique non
 appliquée.
