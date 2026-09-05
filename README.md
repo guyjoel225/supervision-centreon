@@ -314,6 +314,27 @@ décide pas depuis une ligne de commande.
 | [docs/architecture.md](docs/architecture.md) | Ce que fait chaque rôle et pourquoi |
 | [docs/variables.md](docs/variables.md) | Les variables et leur effet |
 
+## Ce qui reste à votre charge
+
+Trois réserves subsistent après le déploiement. Elles ne sont pas des oublis :
+chacune demande une décision ou un accès qui n'appartient pas à ce dépôt. La
+marche à suivre pour chacune est dans
+[docs/exploitation.md](docs/exploitation.md), section « Lever les réserves qui
+subsistent ».
+
+**Faire en sorte que la surveillance alerte réellement.** Elle détecte l'arrêt
+du central, mais écrit dans un journal tant que sa commande d'alerte n'est pas
+renseignée. C'est la plus urgente des trois, et elle ne demande qu'une ligne.
+
+**Recopier les sauvegardes hors du serveur.** Elles protègent d'une erreur
+logique ou d'une migration ratée, pas de la perte de la machine. Et une
+sauvegarde jamais restaurée n'est pas encore une sauvegarde.
+
+**Déclarer un contact dans Centreon.** Aucun n'est créé par ces rôles : un
+service peut passer en critique sans que personne en soit informé. Les
+destinataires, les plages d'astreinte et les seuils d'escalade relèvent de
+l'organisation qui exploite la plateforme.
+
 ## Nature de la validation
 
 `ansible-lint` au profil `production` passe sans avertissement, le contrôle
