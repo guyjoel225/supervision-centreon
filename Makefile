@@ -30,7 +30,7 @@ AUTH = $(BECOME) $(VAULT)
 #   make central OPTS="-e centreon_central_reset_incomplete_install=true"
 OPTS ?=
 
-.PHONY: help deps lint lint-collections lint-variables check deploy deploy-agents snmp-only snmp-v3 snmp-v2c central agents declare verify verify-agents facts diag-base diag-installeur diag-connexion diag-generation diag-agent
+.PHONY: help deps lint lint-collections lint-variables check deploy deploy-agents snmp-only snmp-v3 snmp-v2c central agents declare verify verify-agents facts diag-base diag-installeur diag-connexion diag-generation diag-agent watchdog upgrade retirer-agent
 
 help:
 	@echo "deps     Installer les collections Ansible requises"
@@ -44,6 +44,9 @@ help:
 	@echo "central  Installer ou mettre à jour le seul serveur central"
 	@echo "agents   Configurer les seuls agents SNMP"
 	@echo "declare  Déclarer les hôtes dans Centreon"
+	@echo "watchdog Surveiller le central depuis le contrôleur Ansible"
+	@echo "upgrade  Monter le central de version : constate et sauvegarde"
+	@echo "retirer-agent  Retirer l'agent SNMP d'un hôte : LIMIT et confirmation exigés"
 	@echo "verify   Vérifier la chaîne de bout en bout, sans rien modifier"
 	@echo "verify-agents  Vérifier les agents SNMP depuis le contrôleur, sans central"
 	@echo ""
@@ -115,6 +118,20 @@ agents:
 
 declare:
 	ansible-playbook -i $(INVENTORY) playbooks/40-centreon-hosts.yml $(AUTH) $(OPTS)
+
+# Montée de version du central. Sans OPTS, ne fait que constater et
+# sauvegarder ; rien n'est modifié.
+upgrade:
+	ansible-playbook -i $(INVENTORY) playbooks/60-montee-de-version.yml $(AUTH) $(OPTS)
+
+# Pose la surveillance extérieure du central sur le contrôleur Ansible.
+watchdog:
+	ansible-playbook -i $(INVENTORY) playbooks/50-watchdog.yml $(AUTH) $(OPTS)
+
+# Retire l'agent SNMP d'un hôte et le remet dans son état antérieur.
+# Opération destructive : une limite et une confirmation sont exigées.
+retirer-agent:
+	ansible-playbook -i $(INVENTORY) playbooks/70-retirer-agent-snmp.yml --limit $(LIMIT) $(AUTH) $(OPTS)
 
 verify:
 	ansible-playbook -i $(INVENTORY) playbooks/99-verify.yml $(AUTH) $(OPTS)

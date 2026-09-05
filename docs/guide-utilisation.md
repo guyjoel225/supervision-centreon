@@ -178,7 +178,7 @@ Mettez dans le coffre celle que le central utilise **déjà** : c'est elle qui
 fait foi, pas l'inverse.
 
 ```yaml
-vault_snmp_agent_v2c_community: "la-communaute-du-central"
+vault_snmp_agent_v2c_community: "<COMMUNAUTE_DU_CENTRAL>"
 ```
 
 Le rôle refuse par défaut les communautés de moins de huit caractères et les
@@ -540,6 +540,28 @@ rôle. Les valeurs sensibles ne sont jamais affichées.
 
 ---
 
+## 10 ter. Retirer un serveur de la supervision
+
+```bash
+make retirer-agent LIMIT=<hôte> OPTS="-e snmp_agent_confirmer_retrait=true"
+```
+
+Remet l'hôte dans l'état où il était : agent arrêté et désactivé,
+configuration SNMP antérieure restaurée depuis la sauvegarde que le rôle avait
+prise, utilisateur v3 retiré du fichier persistant, autorisations de pare-feu
+supprimées. Le playbook vérifie ensuite que plus rien n'écoute sur le port
+SNMP.
+
+Deux garde-fous l'encadrent : il refuse de porter sur tout le parc, et exige
+une confirmation explicite après avoir dit ce qu'elle entraîne. Les paquets ne
+sont pas désinstallés, et l'hôte reste déclaré dans Centreon, la suppression
+d'un hôte emportant son historique de métriques.
+
+La procédure détaillée, avec les vérifications à faire avant, est dans
+`docs/ajouter-un-serveur.md`.
+
+---
+
 ## 11. Ce que ce dépôt ne fait pas
 
 **Il n'envoie pas de traps.** Seule l'interrogation périodique est en place,
@@ -553,8 +575,11 @@ temps de fonctionnement, n'en ont pas besoin et fonctionnent. Un service qui
 interrogerait les connexions TCP échouerait : il faudrait alors ajouter
 `.1.3.6.1.2.1.6` à `snmp_agent_view_oids`.
 
-**Sur le central, cinq points restent à traiter avant une vraie mise en
-production :** l'interface web est servie en HTTP sans certificat, SELinux
-reste en `permissive`, aucune sauvegarde de la base n'est automatisée, rien ne
-supervise la supervision elle-même, et aucune procédure de montée de version
-n'est écrite.
+**Les cinq points de mise en production sont traités, chacun avec sa
+réserve.** HTTPS, mais certificat auto-signé à défaut de mieux. SELinux en
+`enforcing`, avec retour automatique en `permissive` si quelque chose casse.
+Sauvegarde nocturne vérifiée, mais qui reste sur la machine. Surveillance
+extérieure du central, dont l'alerte n'atteint personne tant qu'aucune
+commande d'alerte n'est renseignée. Procédure de montée de version écrite,
+dont l'assistant de migration reste manuel. Le détail est dans le README et
+dans `docs/montee-de-version.md`.

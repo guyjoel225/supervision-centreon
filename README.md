@@ -228,11 +228,37 @@ en connaissance de cause.
 témoin, les suivantes le parc par quarts, et toute défaillance arrête tout.
 Une régression est ainsi constatée sur un hôte, pas sur cent.
 
-Ce qui reste à traiter avant une véritable mise en production, et qui est
-écrit ici plutôt que découvert le jour venu : l'interface web du central est
-servie en HTTP sans certificat, SELinux y reste en `permissive`, aucune
-sauvegarde de la base n'est automatisée, rien ne supervise la supervision
-elle-même, et aucune procédure de montée de version n'est écrite.
+**Les cinq points qui séparaient cette plateforme d'une véritable mise en
+production sont désormais traités par le dépôt**, chacun avec sa réserve, qui
+est écrite plutôt que passée sous silence.
+
+L'interface est servie en HTTPS, le trafic en clair étant redirigé, ce qui est
+vérifié sur la plateforme réelle. Le rôle reprend le corps de l'hôte virtuel
+que Centreon déclare sur le port 80 plutôt que de le réécrire, faute de quoi
+le canal chiffré répondrait par une erreur 404. Réserve : sans certificat
+fourni par l'exploitant, celui produit est auto-signé, et chiffre le transport
+sans authentifier le serveur.
+
+SELinux passe en `enforcing` une fois la plateforme en marche, politiques
+Centreon installées et booléens posés. Réserve : si des accès sont refusés ou
+si l'interface cesse de répondre, le rôle revient en `permissive` et le dit.
+Une supervision aveugle est un incident plus grave qu'une politique non
+appliquée.
+
+La base et les fichiers de configuration sont sauvegardés chaque nuit, avec
+vérification des empreintes, rétention et exécution immédiate lors du
+déploiement. Réserve : les archives restent sur la machine. Elles protègent
+d'une erreur logique ou d'une migration ratée, pas de la perte du serveur.
+
+La plateforme se supervise elle-même, et une surveillance extérieure posée sur
+le contrôleur Ansible détecte son arrêt, ce qu'elle seule peut faire. Réserve :
+tant que `supervision_watchdog_alert_command` n'est pas renseignée, l'alerte
+s'écrit dans un journal, ce qui ne réveille personne.
+
+Une procédure de montée de version est écrite et outillée, sauvegarde
+préalable obligatoire et retour arrière documenté, dans
+`docs/montee-de-version.md`. Réserve : l'assistant de migration de la base
+reste manuel, délibérément.
 
 ---
 
@@ -257,6 +283,33 @@ existant : il montre les directives en place sans jamais afficher une
 communauté ni une phrase secrète, et dit si la machine envoie ses alertes
 ailleurs ou expose un accès en écriture.
 
+## Retirer un serveur de la supervision
+
+```bash
+make retirer-agent LIMIT=<hôte> OPTS="-e snmp_agent_confirmer_retrait=true"
+```
+
+Arrête l'agent, restaure la configuration SNMP antérieure si le rôle en avait
+sauvegardé une, retire l'utilisateur v3 et les autorisations de pare-feu
+posées, puis vérifie que plus rien n'écoute. Une limite et une confirmation
+explicite sont exigées : une désupervision se fait machine par machine, jamais
+sur une faute de frappe.
+
+Les paquets ne sont pas désinstallés par défaut, et l'hôte reste déclaré dans
+Centreon : le supprimer effacerait son historique de métriques, ce qui ne se
+décide pas depuis une ligne de commande.
+
+## Documentation
+
+| Document | Ce qu'il couvre |
+|----------|-----------------|
+| [docs/guide-utilisation.md](docs/guide-utilisation.md) | Quel playbook pour quel besoin, quatre scénarios complets |
+| [docs/ajouter-un-serveur.md](docs/ajouter-un-serveur.md) | Raccorder un serveur en service, sans l'interrompre, y compris à un central existant en v2c |
+| [docs/montee-de-version.md](docs/montee-de-version.md) | Monter le central de version, et revenir en arrière |
+| [docs/exploitation.md](docs/exploitation.md) | Opérations courantes et dépannage |
+| [docs/architecture.md](docs/architecture.md) | Ce que fait chaque rôle et pourquoi |
+| [docs/variables.md](docs/variables.md) | Les variables et leur effet |
+
 ## Nature de la validation
 
 `ansible-lint` au profil `production` passe sans avertissement, le contrôle
@@ -264,12 +317,17 @@ syntaxique des playbooks passe, et un script vérifie qu'aucun playbook
 n'emploie une variable d'un rôle qu'il ne charge pas.
 
 Au-delà de ces contrôles, **le déploiement a été exécuté de bout en bout sur
-cinq machines réelles**, trois sous Ubuntu et deux sous Rocky Linux 9 et 10,
+six machines réelles**, quatre sous Ubuntu et deux sous Rocky Linux 9 et 10,
 avec un serveur central installé depuis zéro par le rôle. Le résultat, relevé
-dans l'interface de Centreon : cinq hôtes et **trente services au vert**,
+dans l'interface de Centreon : six hôtes et **trente-six services au vert**,
 alimentés par des mesures réelles en SNMP v3 authentifié et chiffré, chaque
 machine remontant sa mémoire, son processeur, sa charge, ses systèmes de
 fichiers, son espace de pagination et son temps de fonctionnement.
+
+La sixième est un serveur de production extérieur au laboratoire, raccordé
+sans que son fuseau horaire, sa synchronisation d'horloge, sa résolution de
+noms ni son pare-feu ne soient touchés. L'ajout n'a interrompu aucun des
+services déjà collectés.
 
 Ce que cette exécution a coûté est resté dans le dépôt sous forme de
 garde-fous et de diagnostics : un fichier de secrets que Centreon ne remplit
