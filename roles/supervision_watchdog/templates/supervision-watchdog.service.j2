@@ -1,0 +1,12 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Vérification que le serveur central Centreon répond
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ supervision_watchdog_script_path }}
+User=root
+Group=root
+TimeoutStartSec={{ (supervision_watchdog_timeout | int) * 4 }}

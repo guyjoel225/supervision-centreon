@@ -1,0 +1,253 @@
+---
+# ===================================================================
+# Objets de supervision propres au serveur central.
+#
+# Quatrième des cinq points qui séparaient cette plateforme d'une véritable
+# mise en production : rien ne surveillait la supervision elle-même. Un
+# central arrêté ne produit plus d'alertes, ce qui, vu d'un tableau de bord,
+# ressemble exactement à un parc en bonne santé.
+#
+# Ces contrôles portent sur les quatre démons dont dépend la collecte. Ils
+# sont rassemblés dans un modèle d'hôte distinct, appliqué au seul central :
+# les autres machines n'ont pas ces démons, et leur poser ces contrôles
+# produirait des alertes permanentes.
+#
+# Ils ne remplacent pas une surveillance extérieure. Si le central s'arrête,
+# il ne peut pas signaler son propre arrêt : c'est l'objet du rôle
+# supervision_watchdog, posé sur le contrôleur Ansible.
+# ===================================================================
+
+- name: Relever les modèles d'hôtes déjà déclarés pour le central
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: show
+      object: HTPL
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  register: _centreon_hosts_htpl_central
+  changed_when: false
+
+# Le modèle du central hérite de celui des autres machines : il ajoute des
+# contrôles, il n'en retire aucun. Le central reste donc supervisé sur sa
+# mémoire, son processeur et ses disques comme n'importe quel hôte.
+- name: Créer le modèle d'hôte du serveur central
+  when: >-
+    centreon_hosts_central_host_template not in
+    (_centreon_hosts_htpl_central.json.result | default([])
+     | map(attribute='name', default='') | select | list)
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: add
+      object: HTPL
+      values: >-
+        {{ centreon_hosts_central_host_template }};Serveur central Centreon;;;;
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  changed_when: true
+
+- name: Faire hériter le modèle du central de celui des hôtes supervisés
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: addtemplate
+      object: HTPL
+      values: >-
+        {{ centreon_hosts_central_host_template }};{{ centreon_hosts_default_host_template }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+    status_code: [200, 409]
+  register: _centreon_hosts_central_heritage
+  changed_when: false
+  failed_when: _centreon_hosts_central_heritage.status not in [200, 409]
+
+- name: Relever les modèles de services déjà déclarés
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: show
+      object: STPL
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  register: _centreon_hosts_stpl_central
+  changed_when: false
+
+- name: Créer les modèles de services du central
+  when: >-
+    (centreon_hosts_service_prefix ~ item.nom) not in
+    (_centreon_hosts_stpl_central.json.result | default([])
+     | map(attribute='description', default='') | select | list)
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: add
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};{{ item.description }};{{ centreon_hosts_service_parent }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_central_services }}"
+  loop_control:
+    label: "{{ centreon_hosts_service_prefix }}{{ item.nom }}"
+  changed_when: true
+
+# Comme pour les autres services, les réglages sont posés à chaque exécution
+# et non à la seule création : les conditionner à « la création vient d'avoir
+# lieu » les rendrait inopérants sur une plateforme déjà déployée.
+# L'alias du modèle est la source de la description que portera chaque service
+# créé sur un hôte. Ne le poser qu'à la création laissait les modèles déjà
+# existants avec leur ancien alias : renommer les services d'un hôte ne
+# suffisait pas, puisque le modèle continuait d'en engendrer de nouveaux sous
+# le nom abandonné. Il est donc réaligné à chaque exécution, comme les autres
+# réglages.
+- name: Aligner l'alias de chaque modèle de service du central
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};alias;{{ item.description }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_central_services }}"
+  loop_control:
+    label: "{{ item.nom }} -> {{ item.description }}"
+  changed_when: false
+
+- name: Régler la commande de chaque modèle de service du central
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};check_command;{{ centreon_hosts_command_name }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_central_services }}"
+  loop_control:
+    label: "{{ item.nom }}"
+  changed_when: false
+
+- name: Poser la période de contrôle de chaque modèle de service du central
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};check_period;{{ _centreon_hosts_periode }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_central_services }}"
+  loop_control:
+    label: "{{ item.nom }}"
+  changed_when: false
+
+- name: Poser le mode du plugin sur chaque modèle de service du central
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setmacro
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};MODE;{{ centreon_hosts_central_mode }};0;Mode du plugin Linux SNMP
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_central_services }}"
+  loop_control:
+    label: "{{ item.nom }} -> {{ centreon_hosts_central_mode }}"
+  changed_when: false
+
+# Cette macro alimente $_SERVICEEXTRAOPTIONS$ dans la ligne de commande. Elle
+# est vide pour tous les autres services, qui ne s'en trouvent pas modifiés.
+- name: Poser le filtre de processus de chaque modèle de service du central
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setmacro
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};EXTRAOPTIONS;--process-name={{ item.processus }}
+        {{ centreon_hosts_central_seuil }};0;Options propres a ce controle
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_central_services }}"
+  loop_control:
+    label: "{{ item.nom }} -> {{ item.processus }}"
+  changed_when: false
+
+- name: Rattacher les modèles de services au modèle d'hôte du central
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: addhosttemplate
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};{{ centreon_hosts_central_host_template }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+    status_code: [200, 409]
+  loop: "{{ centreon_hosts_central_services }}"
+  loop_control:
+    label: "{{ item.nom }}"
+  register: _centreon_hosts_central_rattachement
+  changed_when: false
+  failed_when: _centreon_hosts_central_rattachement.status not in [200, 409]
+
+- name: Confirmer ce qui surveille désormais le serveur central
+  ansible.builtin.debug:
+    msg: >-
+      Le modèle {{ centreon_hosts_central_host_template }} porte
+      {{ centreon_hosts_central_services | length }} contrôles supplémentaires
+      ({{ centreon_hosts_central_services | map(attribute='processus') | join(', ') }}).
+      Pour qu'un hôte en bénéficie, lui poser
+      « centreon_host_template: {{ centreon_hosts_central_host_template }} »
+      dans l'inventaire. Ces contrôles ne détectent pas l'arrêt du central
+      lui-même : cela demande une surveillance extérieure.

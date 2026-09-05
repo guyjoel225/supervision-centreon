@@ -1,0 +1,138 @@
+---
+# ===================================================================
+# Surveillance extérieure du serveur central Centreon.
+#
+# Posé sur une autre machine que le central, en pratique le contrôleur
+# Ansible. Ce rôle ne surveille qu'une chose, que le central réponde, et c'est
+# ce qui le rend fiable : il n'a besoin ni de la base, ni du moteur, ni de
+# l'interface de programmation de la plateforme qu'il surveille.
+# ===================================================================
+
+- name: Refuser de surveiller le central depuis le central lui-même
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname not in (groups['centreon_central'] | default([]))
+    fail_msg: >-
+      Ce rôle est appliqué à {{ inventory_hostname }}, qui est le serveur
+      central lui-même. Une machine arrêtée ne peut pas signaler son propre
+      arrêt : la surveillance n'aurait alors aucune valeur. Le poser sur une
+      autre machine, par exemple le contrôleur Ansible.
+    success_msg: >-
+      {{ inventory_hostname }} est extérieur au serveur central : la
+      surveillance survivra à son arrêt.
+    quiet: true
+
+- name: Vérifier qu'une adresse à surveiller est connue
+  ansible.builtin.assert:
+    that:
+      - supervision_watchdog_target_url is search('://[^:/]+')
+    fail_msg: >-
+      Aucune adresse de serveur central n'a pu être établie. Renseigner
+      supervision_watchdog_target_url, ou déclarer un hôte dans le groupe
+      centreon_central de l'inventaire.
+    quiet: true
+
+- name: Installer de quoi interroger le central
+  ansible.builtin.package:
+    name: curl
+    state: present
+
+- name: Déposer le script de surveillance
+  ansible.builtin.template:
+    src: supervision-watchdog.sh.j2
+    dest: "{{ supervision_watchdog_script_path }}"
+    owner: root
+    group: root
+    mode: "0700"
+    validate: /bin/bash -n %s
+
+- name: Déclarer le service de surveillance
+  ansible.builtin.template:
+    src: supervision-watchdog.service.j2
+    dest: /etc/systemd/system/supervision-watchdog.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recharger les unites systemd
+
+- name: Déclarer le déclenchement périodique
+  ansible.builtin.template:
+    src: supervision-watchdog.timer.j2
+    dest: /etc/systemd/system/supervision-watchdog.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recharger les unites systemd
+
+- name: Prendre en compte les unités avant de les activer
+  ansible.builtin.meta: flush_handlers
+
+# En simulation, les gabarits ci-dessus n'écrivent rien : activer une unité que
+# systemd ne connaît pas échouerait alors sur un message désignant l'unité,
+# alors que la cause est le mode d'exécution. Ce que la simulation peut
+# montrer, elle l'a déjà montré : les fichiers qui seraient déposés.
+- name: Activer la surveillance périodique
+  when: not ansible_check_mode
+  ansible.builtin.systemd_service:
+    name: supervision-watchdog.timer
+    enabled: true
+    state: started
+
+# ------------------------------------------------------------------
+# Preuve
+# ------------------------------------------------------------------
+
+# La preuve suppose d'exécuter réellement la vérification. En simulation, la
+# commande serait sautée et le relevé qui suit échouerait sur un fichier
+# jamais écrit : tout ce bloc est donc réservé à une exécution réelle.
+- name: Exécuter une première vérification
+  when: not ansible_check_mode
+  ansible.builtin.command:
+    cmd: "{{ supervision_watchdog_script_path }}"
+  register: _supervision_watchdog_execution
+  changed_when: false
+
+- name: Relever l'état laissé par cette vérification
+  when: not ansible_check_mode
+  ansible.builtin.slurp:
+    src: "{{ supervision_watchdog_state_file }}"
+  register: _supervision_watchdog_etat
+
+- name: Établir ce que la vérification a constaté
+  when: not ansible_check_mode
+  ansible.builtin.set_fact:
+    _supervision_watchdog_code: >-
+      {{ (_supervision_watchdog_etat.content | b64decode)
+         | regex_search('^dernier_code=(.*)$', '\1', multiline=True) | first | trim }}
+
+- name: Confirmer que la surveillance fonctionne
+  when: not ansible_check_mode
+  ansible.builtin.assert:
+    that:
+      - _supervision_watchdog_code | int != 0
+    fail_msg: >-
+      La surveillance est en place sur {{ inventory_hostname }} mais le
+      central n'a pas répondu ({{ supervision_watchdog_target_url }}, code
+      {{ _supervision_watchdog_code }}). Ou bien le central est réellement
+      arrêté, ou bien cette machine ne peut pas le joindre, ce qui rendrait la
+      surveillance faussement alarmante.
+    success_msg: >-
+      La surveillance est en place sur {{ inventory_hostname }} et le central
+      a répondu (code {{ _supervision_watchdog_code }}). Vérification toutes
+      les « {{ supervision_watchdog_schedule }} », alerte après
+      {{ supervision_watchdog_failures_before_alert }} échecs consécutifs.
+    quiet: true
+
+# Le rôle serait malhonnête s'il laissait croire qu'il alerte quelqu'un alors
+# qu'il écrit seulement dans un journal que personne ne lit la nuit.
+- name: Rappeler que le journal ne réveille personne
+  when: "'logger' in supervision_watchdog_alert_command"
+  ansible.builtin.debug:
+    msg: >-
+      L'alerte se contente d'écrire dans le journal du système de
+      {{ inventory_hostname }}. C'est une trace, pas une alerte : si le
+      central s'arrête cette nuit, personne ne l'apprendra avant de consulter
+      ce journal. Pour que cette surveillance tienne sa promesse, renseigner
+      supervision_watchdog_alert_command avec ce qui atteint réellement
+      l'astreinte : envoi de courriel, passerelle SMS ou crochet HTTP. Le
+      message d'alerte lui sera passé en argument.

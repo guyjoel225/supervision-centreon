@@ -1,0 +1,53 @@
+---
+# ===================================================================
+# Surveillance extérieure du serveur central
+# ===================================================================
+#
+# Cinquième point resté ouvert avant la mise en production : rien ne
+# surveillait la supervision. Les contrôles posés dans Centreon sur ses
+# propres démons servent tant que Centreon tourne ; le jour où il s'arrête,
+# c'est justement lui qui devrait alerter, et il ne le peut pas.
+#
+# Ce rôle est donc posé sur une autre machine, en pratique le contrôleur
+# Ansible. Il ne remplace pas la supervision : il ne surveille qu'une chose,
+# que le central réponde, et c'est ce qui le rend fiable.
+
+supervision_watchdog_enabled: true
+
+# Adresse interrogée. Par défaut, la page d'accueil de l'interface du premier
+# central déclaré dans l'inventaire.
+supervision_watchdog_target_url: >-
+  {{ centreon_web_protocol | default('https') }}://{{
+     (groups['centreon_central'] | default([]) | first
+      | default('')) | extract(hostvars, 'ansible_host') | default('') }}:{{
+     centreon_web_port
+     | default(443 if (centreon_web_protocol | default('https')) == 'https' else 80) }}/centreon/
+
+# Un certificat auto-signé ne peut pas être validé. La surveillance porte sur
+# la disponibilité, pas sur l'authenticité du certificat : elle ne doit pas
+# alerter parce qu'un certificat est auto-signé.
+supervision_watchdog_validate_certs: >-
+  {{ centreon_web_validate_certs
+     | default((centreon_web_tls_certificate | default('')) | length > 0) }}
+
+supervision_watchdog_script_path: /usr/local/sbin/supervision-watchdog
+supervision_watchdog_state_file: /var/lib/supervision-watchdog.state
+
+# Fréquence de la vérification et nombre d'échecs consécutifs avant d'alerter.
+# Un seul échec ne prouve rien : un redémarrage du serveur web, une coupure
+# réseau d'une seconde suffisent. Trois échecs à cinq minutes d'intervalle
+# désignent une panne, pas un hoquet.
+supervision_watchdog_schedule: "*:0/5"
+supervision_watchdog_failures_before_alert: 3
+supervision_watchdog_timeout: 15
+
+# Commande exécutée quand le seuil est franchi. Le message lui est passé en
+# premier argument.
+#
+# Le défaut écrit dans le journal du système. C'est une trace, pas une
+# alerte : personne n'est réveillé. Pour que ce rôle tienne sa promesse, il
+# faut y mettre ce qui atteint réellement l'astreinte, un envoi de courriel,
+# un appel de passerelle SMS ou un crochet HTTP. Le rôle le rappelle à chaque
+# exécution tant que cette commande n'est pas changée.
+supervision_watchdog_alert_command: >-
+  /usr/bin/logger --tag supervision-watchdog --priority daemon.crit --

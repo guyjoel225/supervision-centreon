@@ -1,0 +1,18 @@
+---
+# ===================================================================
+# Surveillance extérieure du serveur central.
+#
+# Posée sur le contrôleur Ansible, c'est-à-dire ailleurs que sur la machine
+# surveillée : un central arrêté ne peut pas signaler son propre arrêt.
+#
+# Usage : ansible-playbook playbooks/50-watchdog.yml
+# ou      make watchdog
+# ===================================================================
+
+- name: Surveiller le serveur central depuis l'extérieur
+  hosts: ansible_controller
+  become: true
+  gather_facts: true
+  roles:
+    - role: supervision_watchdog
+      when: supervision_watchdog_enabled | bool

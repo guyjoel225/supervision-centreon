@@ -1,0 +1,64 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Vérifie que le serveur central Centreon répond, et alerte s'il ne répond
+# plus. Exécuté depuis une autre machine que lui : un central arrêté ne peut
+# pas signaler son propre arrêt.
+#
+# Le compteur d'échecs consécutifs est tenu dans un fichier d'état. Alerter
+# au premier échec produirait du bruit à chaque redémarrage du serveur web ;
+# ne jamais alerter serait pire.
+
+set -uo pipefail
+
+CIBLE="{{ supervision_watchdog_target_url }}"
+ETAT="{{ supervision_watchdog_state_file }}"
+SEUIL={{ supervision_watchdog_failures_before_alert }}
+DELAI={{ supervision_watchdog_timeout }}
+{% if not (supervision_watchdog_validate_certs | bool) %}
+CURL_TLS="--insecure"
+{% else %}
+CURL_TLS=""
+{% endif %}
+
+journal() {
+    echo "[$(date '+%Y-%m-%dT%H:%M:%S%z')] $*"
+}
+
+echecs=0
+[ -r "${ETAT}" ] && echecs=$(sed -n 's/^echecs=//p' "${ETAT}" | head -1)
+[ -n "${echecs}" ] || echecs=0
+
+code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --max-time "${DELAI}" ${CURL_TLS} "${CIBLE}" || echo 000)
+
+# 401 et 302 prouvent que la plateforme répond : elle demande simplement à
+# s'authentifier. Seule l'absence de réponse, ou une erreur du serveur, compte
+# comme une panne.
+case "${code}" in
+    200|301|302|401|403)
+        if [ "${echecs}" -ge "${SEUIL}" ]; then
+            {{ supervision_watchdog_alert_command }} "Le serveur central Centreon repond de nouveau (${CIBLE}, code ${code})."
+            journal "Rétabli après ${echecs} échecs consécutifs"
+        fi
+        echecs=0
+        ;;
+    *)
+        echecs=$(( echecs + 1 ))
+        journal "Pas de réponse de ${CIBLE} (code ${code}), échec consécutif numéro ${echecs}"
+        # L'alerte est émise au franchissement du seuil, pas à chaque
+        # exécution : une panne longue produirait sinon une alerte toutes les
+        # cinq minutes, et on cesserait de les lire.
+        if [ "${echecs}" -eq "${SEUIL}" ]; then
+            {{ supervision_watchdog_alert_command }} "Le serveur central Centreon ne repond plus depuis ${echecs} verifications (${CIBLE}, code ${code}). La supervision du parc est aveugle."
+        fi
+        ;;
+esac
+
+cat > "${ETAT}" <<FIN
+echecs=${echecs}
+dernier_code=${code}
+derniere_verification=$(date +%s)
+cible=${CIBLE}
+FIN
+chmod 0644 "${ETAT}"

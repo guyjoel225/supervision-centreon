@@ -14,9 +14,18 @@
 # Centreon expose deux interfaces de programmation. Celle utilisée ici est
 # l'API v1, qui donne accès aux commandes CLAPI : c'est la seule qui couvre
 # aujourd'hui l'intégralité de la configuration (hôtes, macros, export).
-centreon_hosts_api_protocol: "{{ centreon_web_protocol | default('http') }}"
+centreon_hosts_api_protocol: "{{ centreon_web_protocol | default('https') }}"
 centreon_hosts_api_host: "{{ ansible_host | default(inventory_hostname) }}"
-centreon_hosts_api_port: "{{ centreon_web_port | default(80) }}"
+centreon_hosts_api_port: >-
+  {{ centreon_web_port
+     | default(443 if (centreon_web_protocol | default('https')) == 'https' else 80) }}
+
+# Un certificat auto-signé ne peut pas être validé. Le défaut suit donc la
+# présence d'un certificat fourni par l'exploitant, exactement comme dans le
+# rôle centreon_central : les deux ne peuvent pas diverger.
+centreon_hosts_validate_certs: >-
+  {{ centreon_web_validate_certs
+     | default((centreon_web_tls_certificate | default('')) | length > 0) }}
 centreon_hosts_api_url: "{{ centreon_hosts_api_protocol }}://{{ centreon_hosts_api_host }}:{{ centreon_hosts_api_port }}/centreon/api/index.php"
 centreon_hosts_api_user: "{{ centreon_web_admin_login | default('admin') }}"
 centreon_hosts_api_password: "{{ centreon_web_admin_password }}"
@@ -77,6 +86,49 @@ centreon_hosts_command_line: >-
   --hostname=$HOSTADDRESS$
   --snmp-version=$_HOSTSNMPVERSION$
   $_HOSTSNMPEXTRAOPTIONS$
+  $_SERVICEEXTRAOPTIONS$
+
+# ===================================================================
+# Supervision du serveur central lui-même
+# ===================================================================
+#
+# Une plateforme de supervision qui ne se supervise pas peut s'arrêter sans
+# que personne l'apprenne : les hôtes cessent simplement de changer d'état, ce
+# qui ressemble beaucoup à un parc en bonne santé. Ces services surveillent
+# les quatre démons dont dépend la collecte.
+#
+# Ils sont portés par un modèle d'hôte distinct, appliqué au seul central via
+# « centreon_host_template » dans l'inventaire : les autres machines n'ont pas
+# ces démons, et leur poser ces contrôles produirait des alertes permanentes.
+#
+# Ces services ne remplacent pas une surveillance extérieure : si le central
+# s'arrête, c'est lui qui devrait alerter. C'est l'objet du rôle
+# « supervision_watchdog », posé sur le contrôleur Ansible.
+centreon_hosts_central_host_template: >-
+  {{ centreon_central_host_template | default('SUP-Linux-Central') }}
+
+# Le mode « processcount » compte les processus dont le nom correspond au
+# filtre. Un seuil critique de « 1: » signifie « au moins un » : zéro processus
+# déclenche l'alerte.
+# Mode du plugin et seuil employés pour ces contrôles. Les options complètes
+# sont assemblées par le rôle, qui y ajoute le nom du processus de chaque
+# service : les écrire ici demanderait un gabarit dans un gabarit.
+centreon_hosts_central_mode: processcount
+centreon_hosts_central_seuil: "--critical-count=1:"
+
+centreon_hosts_central_services:
+  - nom: Moteur
+    description: "Moteur de supervision"
+    processus: centengine
+  - nom: Broker
+    description: "Collecteur de resultats"
+    processus: cbd
+  - nom: Gorgone
+    description: "Ordonnanceur Gorgone"
+    processus: gorgoned
+  - nom: BaseDeDonnees
+    description: "Base de donnees de la supervision"
+    processus: mariadbd
 
 # Préfixe des modèles de services créés par le rôle.
 centreon_hosts_service_prefix: "SUP-Linux-"

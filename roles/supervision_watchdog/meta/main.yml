@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  role_name: supervision_watchdog
+  author: Joel Konan
+  description: >-
+    Surveille depuis l'extérieur que le serveur central Centreon répond
+    toujours. Un central arrêté ne peut pas signaler son propre arrêt : ce
+    rôle est donc posé sur une autre machine que lui.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+    - name: EL
+      versions: ["9"]
+  galaxy_tags: [monitoring, centreon, watchdog]
+dependencies: []

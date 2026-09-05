@@ -24,5 +24,11 @@
 - name: Importer la déclaration des hôtes dans Centreon
   ansible.builtin.import_playbook: 40-centreon-hosts.yml
 
+# La surveillance extérieure vient après la déclaration des hôtes : elle
+# interroge le central, qui doit donc être en service. Elle est posée ailleurs
+# que sur lui, un central arrêté ne pouvant pas signaler son propre arrêt.
+- name: Importer la surveillance extérieure du serveur central
+  ansible.builtin.import_playbook: 50-watchdog.yml
+
 - name: Importer la vérification de bout en bout
   ansible.builtin.import_playbook: 99-verify.yml

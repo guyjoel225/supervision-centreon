@@ -1,0 +1,13 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Déclenchement périodique de la vérification du central Centreon
+
+[Timer]
+OnCalendar={{ supervision_watchdog_schedule }}
+# Sans persistance : rattraper des vérifications manquées n'a aucun sens, seul
+# l'état présent du central compte.
+Persistent=false
+Unit=supervision-watchdog.service
+
+[Install]
+WantedBy=timers.target
