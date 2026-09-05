@@ -1,4 +1,22 @@
 ---
+# Ce rôle ne parle qu'à l'interface de programmation de Centreon, que la
+# simulation n'interroge pas : chaque relevé reviendrait vide et chaque
+# décision qui en dépend serait fausse. Plutôt que de produire une erreur
+# désignant un jeton absent, le rôle s'arrête en disant pourquoi.
+- name: Expliquer pourquoi la simulation ne peut rien évaluer ici
+  when: ansible_check_mode
+  ansible.builtin.debug:
+    msg: >-
+      Simulation sans effet sur {{ inventory_hostname }} : la déclaration des
+      hôtes passe entièrement par l'interface de programmation de Centreon,
+      qui n'est pas interrogée en mode simulation. Aucun objet ne peut être
+      relevé ni comparé. Relancer sans --check pour déclarer les hôtes, leurs
+      services et les contrôles du serveur central.
+
+- name: Terminer la simulation pour cette machine
+  when: ansible_check_mode
+  ansible.builtin.meta: end_host
+
 - name: Vérifier que le périmètre est exploitable
   ansible.builtin.assert:
     that:
@@ -15,6 +33,11 @@
 # Les objets de supervision doivent exister avant les hôtes qui s'y réfèrent.
 - name: Créer les objets de supervision propres au projet
   ansible.builtin.include_tasks: objets_supervision.yml
+
+# Les contrôles propres au serveur central viennent après le catalogue
+# commun, dont leur modèle d'hôte hérite.
+- name: Créer les objets de supervision du serveur central
+  ansible.builtin.include_tasks: objets_central.yml
 
 - name: Déclarer les groupes d'hôtes
   ansible.builtin.include_tasks: hostgroups.yml

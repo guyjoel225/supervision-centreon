@@ -15,6 +15,7 @@
     name: firewalld
   register: _snmp_agent_firewalld
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Relever l'état de ufw
@@ -23,6 +24,7 @@
     cmd: ufw status
   register: _snmp_agent_ufw
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Retenir quel pare-feu gouverne cette machine
@@ -63,6 +65,7 @@
             cmd: firewall-cmd --permanent --list-rich-rules
           register: _snmp_agent_rich_rules
           changed_when: false
+          check_mode: false
 
         - name: Retirer les autorisations qui ne sont plus déclarées
           vars:
@@ -110,6 +113,7 @@
             cmd: ufw status numbered
           register: _snmp_agent_ufw_rules
           changed_when: false
+          check_mode: false
 
         - name: Retirer les autorisations qui ne sont plus déclarées
           vars:

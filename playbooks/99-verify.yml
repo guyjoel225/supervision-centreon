@@ -12,6 +12,11 @@
 
 - name: Vérifier les agents SNMP sur les hôtes supervisés
   hosts: monitored
+  # Ce playbook ne modifie rien : il relève et compare. Il doit donc
+  # s'exécuter même sous --check, sans quoi chaque relevé reviendrait vide et
+  # chaque vérification échouerait en désignant un agent muet alors que la
+  # cause est le mode d'exécution.
+  check_mode: false
   gather_facts: true
   tags: [verify, verify_agents]
   tasks:
@@ -116,6 +121,11 @@
 
 - name: Interroger chaque hôte depuis le serveur central
   hosts: centreon_central
+  # Ce playbook ne modifie rien : il relève et compare. Il doit donc
+  # s'exécuter même sous --check, sans quoi chaque relevé reviendrait vide et
+  # chaque vérification échouerait en désignant un agent muet alors que la
+  # cause est le mode d'exécution.
+  check_mode: false
   gather_facts: true
   tags: [verify, verify_snmp]
   tasks:
@@ -234,6 +244,11 @@
 
 - name: Vérifier la plateforme Centreon elle-même
   hosts: centreon_central
+  # Ce playbook ne modifie rien : il relève et compare. Il doit donc
+  # s'exécuter même sous --check, sans quoi chaque relevé reviendrait vide et
+  # chaque vérification échouerait en désignant un agent muet alors que la
+  # cause est le mode d'exécution.
+  check_mode: false
   gather_facts: true
   tags: [verify, verify_central]
   tasks:
@@ -260,6 +275,7 @@
     - name: Ouvrir une session sur l'API de configuration
       ansible.builtin.uri:
         url: "{{ centreon_api_url }}?action=authenticate"
+        validate_certs: "{{ centreon_web_validate_certs | default((centreon_web_tls_certificate | default('')) | length > 0) }}"
         method: POST
         body_format: form-urlencoded
         body:
@@ -272,6 +288,7 @@
     - name: Lister les hôtes connus de Centreon
       ansible.builtin.uri:
         url: "{{ centreon_api_url }}?action=action&object=centreon_clapi"
+        validate_certs: "{{ centreon_web_validate_certs | default((centreon_web_tls_certificate | default('')) | length > 0) }}"
         method: POST
         headers:
           centreon-auth-token: "{{ _verify_auth.json.authToken }}"

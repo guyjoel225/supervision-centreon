@@ -8,13 +8,17 @@
   ansible.builtin.command: getenforce
   register: _centreon_central_selinux_current
   changed_when: false
+  check_mode: false
   failed_when: false
 
-- name: Appliquer l'état SELinux demandé
-  when: centreon_central_selinux_state in ['permissive', 'enforcing']
+# C'est l'état d'installation qui est posé ici, pas l'état cible : le
+# durcissement a lieu en fin de rôle, une fois la plateforme en marche, dans
+# selinux.yml.
+- name: Appliquer l'état SELinux d'installation
+  when: centreon_central_selinux_install_state in ['permissive', 'enforcing']
   ansible.posix.selinux:
     policy: targeted
-    state: "{{ centreon_central_selinux_state }}"
+    state: "{{ centreon_central_selinux_install_state }}"
   register: _centreon_central_selinux_applied
 
 - name: Désactiver complètement SELinux

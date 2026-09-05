@@ -29,17 +29,44 @@
   register: _centreon_central_tables_actuelles
   failed_when: false
   changed_when: false
+  # Un relevé ne modifie rien et doit donc s'exécuter même en simulation.
+  # Sans cela, « make check » sautait cette requête, le comptage tombait à
+  # zéro, et le rôle concluait à une installation incohérente sur une
+  # plateforme parfaitement saine, en proposant de la réinitialiser.
+  check_mode: false
 
+# Zéro table et « je n'ai pas pu compter » ne sont pas la même chose. Les
+# confondre a produit un diagnostic faux, et le message qui l'accompagnait
+# invitait à détruire une plateforme en service. L'inconnu vaut donc -1, et
+# aucune conclusion n'est tirée dans ce cas.
 - name: Établir si la plateforme est réellement installée
+  vars:
+    _comptage: >-
+      {{ (_centreon_central_tables_actuelles.query_result[0][0].total
+          | default(-1)) | int
+         if (_centreon_central_tables_actuelles.query_result is defined)
+         else -1 }}
   ansible.builtin.set_fact:
+    _centreon_central_tables_comptees: "{{ _comptage | int }}"
     _centreon_central_conf:
       stat:
         exists: >-
           {{ _centreon_central_conf_fichier.stat.exists
-             and (_centreon_central_tables_actuelles.query_result[0][0].total | default(0) | int) > 100 }}
+             and (_comptage | int) > 100 }}
     _centreon_central_etat_incoherent: >-
       {{ _centreon_central_conf_fichier.stat.exists
-         and (_centreon_central_tables_actuelles.query_result[0][0].total | default(0) | int) <= 100 }}
+         and (_comptage | int) >= 0
+         and (_comptage | int) <= 100 }}
+
+- name: Signaler que l'état de la base n'a pas pu être établi
+  when: (_centreon_central_tables_comptees | int) < 0
+  ansible.builtin.debug:
+    msg: >-
+      Le nombre de tables n'a pas pu être relevé sur {{ inventory_hostname }}.
+      Aucune conclusion n'en est tirée : la plateforme n'est ni déclarée
+      installée, ni déclarée incohérente. Vérifier que la base répond avant
+      d'aller plus loin, et surtout ne pas employer
+      centreon_central_reset_incomplete_install sur cette seule base.
 
 - name: Signaler un état incohérent et le réparer
   when: _centreon_central_etat_incoherent | bool
@@ -206,6 +233,7 @@
     - name: Attendre que l'interface web réponde
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/install.php"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: GET
         status_code: [200]
       register: _centreon_central_session
@@ -223,6 +251,7 @@
     - name: Afficher le premier écran, qui écrit la configuration de base
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/step.php?action=stepContent"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: GET
         headers:
           Cookie: "{{ _centreon_central_session.cookies_string }}"
@@ -238,6 +267,7 @@
     - name: Avancer jusqu'à l'écran des chemins du moteur
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: GET
         headers:
           Cookie: "{{ _centreon_central_session.cookies_string }}"
@@ -251,6 +281,7 @@
     - name: Renseigner les chemins du moteur de supervision
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/process/process_step3.php"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: POST
         body_format: form-urlencoded
         body: "{{ _centreon_central_engine_post }}"
@@ -267,6 +298,7 @@
     - name: Avancer après l'écran 3
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: GET
         headers:
           Cookie: "{{ _centreon_central_session.cookies_string }}"
@@ -276,6 +308,7 @@
     - name: Renseigner les chemins du broker
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/process/process_step4.php"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: POST
         body_format: form-urlencoded
         body: "{{ _centreon_central_broker_post }}"
@@ -292,6 +325,7 @@
     - name: Avancer après l'écran 4
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: GET
         headers:
           Cookie: "{{ _centreon_central_session.cookies_string }}"
@@ -301,6 +335,7 @@
     - name: Créer le compte administrateur
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/process/process_step5.php"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: POST
         body_format: form-urlencoded
         body:
@@ -338,6 +373,7 @@
     - name: Avancer après l'écran 5
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: GET
         headers:
           Cookie: "{{ _centreon_central_session.cookies_string }}"
@@ -347,6 +383,7 @@
     - name: Renseigner les paramètres de la base de données
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/process/process_step6.php"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: POST
         body_format: form-urlencoded
         body:
@@ -388,6 +425,7 @@
     - name: Avancer après l'écran 6
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: GET
         headers:
           Cookie: "{{ _centreon_central_session.cookies_string }}"
@@ -406,6 +444,7 @@
     - name: Avancer vers l'écran des modules
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: GET
         headers:
           Cookie: "{{ _centreon_central_session.cookies_string }}"
@@ -445,6 +484,7 @@
         or (_centreon_central_widgets_a_poser | length > 0)
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/process/process_step8.php"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: POST
         body_format: form-urlencoded
         body:
@@ -461,6 +501,7 @@
     - name: Avancer vers l'écran de clôture
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/step.php?action=nextStep"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: GET
         headers:
           Cookie: "{{ _centreon_central_session.cookies_string }}"
@@ -470,6 +511,7 @@
     - name: Clore l'installation
       ansible.builtin.uri:
         url: "{{ _centreon_central_install_base }}/steps/process/process_step9.php"
+        validate_certs: "{{ centreon_central_web_validate_certs }}"
         method: POST
         body_format: form-urlencoded
         body:

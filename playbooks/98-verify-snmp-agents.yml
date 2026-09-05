@@ -16,6 +16,11 @@
 
 - name: Ouvrir temporairement les agents au contrôleur
   hosts: monitored
+  # Ce playbook ne modifie rien : il relève et compare. Il doit donc
+  # s'exécuter même sous --check, sans quoi chaque relevé reviendrait vide et
+  # chaque vérification échouerait en désignant un agent muet alors que la
+  # cause est le mode d'exécution.
+  check_mode: false
   gather_facts: true
   tags: [verify_snmp_local]
   tasks:
@@ -45,6 +50,11 @@
 
 - name: Interroger les agents depuis le contrôleur Ansible
   hosts: ansible_controller
+  # Ce playbook ne modifie rien : il relève et compare. Il doit donc
+  # s'exécuter même sous --check, sans quoi chaque relevé reviendrait vide et
+  # chaque vérification échouerait en désignant un agent muet alors que la
+  # cause est le mode d'exécution.
+  check_mode: false
   gather_facts: true
   tags: [verify_snmp_local]
   tasks:
@@ -178,6 +188,11 @@
 
 - name: Refermer l'ouverture temporaire accordée au contrôleur
   hosts: monitored
+  # Ce playbook ne modifie rien : il relève et compare. Il doit donc
+  # s'exécuter même sous --check, sans quoi chaque relevé reviendrait vide et
+  # chaque vérification échouerait en désignant un agent muet alors que la
+  # cause est le mode d'exécution.
+  check_mode: false
   gather_facts: true
   tags: [verify_snmp_local]
   tasks:
