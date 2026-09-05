@@ -308,6 +308,7 @@ décide pas depuis une ligne de commande.
 |----------|-----------------|
 | [docs/guide-utilisation.md](docs/guide-utilisation.md) | Quel playbook pour quel besoin, quatre scénarios complets |
 | [docs/ajouter-un-serveur.md](docs/ajouter-un-serveur.md) | Raccorder un serveur en service, sans l'interrompre, y compris à un central existant en v2c |
+| [docs/catalogue-supervision.md](docs/catalogue-supervision.md) | Tout ce que le plugin sait mesurer, la branche SNMP que chaque mode exige, et comment ajouter un contrôle |
 | [docs/montee-de-version.md](docs/montee-de-version.md) | Monter le central de version, et revenir en arrière |
 | [docs/exploitation.md](docs/exploitation.md) | Opérations courantes et dépannage |
 | [docs/architecture.md](docs/architecture.md) | Ce que fait chaque rôle et pourquoi |
