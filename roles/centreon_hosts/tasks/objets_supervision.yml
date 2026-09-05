@@ -15,6 +15,7 @@
 - name: Relever les commandes déjà déclarées
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -32,6 +33,7 @@
     (_centreon_hosts_commandes.json.result | default([]) | map(attribute='name', default='') | select | list)
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -50,6 +52,7 @@
     (_centreon_hosts_commandes.json.result | default([]) | map(attribute='name', default='') | select | list)
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -68,6 +71,7 @@
 - name: Aligner la ligne de la commande de contrôle
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -82,6 +86,7 @@
 - name: Relever les modèles d'hôtes déjà déclarés
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -99,6 +104,7 @@
     (_centreon_hosts_modeles.json.result | default([]) | map(attribute='name', default='') | select | list)
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -118,6 +124,7 @@
 - name: Rattacher la commande de vérification au modèle d'hôte
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -136,6 +143,7 @@
 - name: Relever les périodes de temps disponibles
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -166,6 +174,7 @@
 - name: Relever les modèles de services déjà déclarés
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -206,6 +215,7 @@
     (_centreon_hosts_stpl.json.result | default([]) | map(attribute='description', default='') | select | list)
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -240,9 +250,56 @@
 # pas si une écriture a réellement changé quelque chose, et l'affirmer
 # fausserait le rapport à chaque passage.
 
+# L'alias du modèle est la source de la description que portera chaque service
+# créé sur un hôte. Ne le poser qu'à la création laissait les modèles déjà
+# existants avec leur ancien alias : renommer les services d'un hôte ne
+# suffisait pas, puisque le modèle continuait d'en engendrer de nouveaux sous
+# le nom abandonné. Il est donc réaligné à chaque exécution, comme les autres
+# réglages.
+# Les réglages ci-dessous sont appliqués à chaque exécution, donc marqués sans
+# effet : le rôle ne peut pas en déduire qu'il doit redéployer. Ce relevé
+# établit ce qui diffère réellement du catalogue, et c'est lui qui décidera de
+# la génération, en apply.yml. Sans cela, un alias corrigé restait dans la base
+# sans jamais atteindre le moteur, et il fallait forcer le déploiement à la
+# main sans savoir pourquoi.
+- name: Établir les modèles dont l'alias ne correspond plus au catalogue
+  vars:
+    _existants: "{{ _centreon_hosts_stpl.json.result | default([]) }}"
+  ansible.builtin.set_fact:
+    _centreon_hosts_alias_desalignes: >-
+      {{ _centreon_hosts_alias_desalignes | default([]) + [item.nom]
+         if (_existants
+             | selectattr('description', 'defined')
+             | selectattr('description', 'eq', centreon_hosts_service_prefix ~ item.nom)
+             | map(attribute='alias', default='') | list | first | default('')) != item.description
+         else _centreon_hosts_alias_desalignes | default([]) }}
+  loop: "{{ centreon_hosts_services }}"
+  loop_control:
+    label: "{{ item.nom }}"
+
+- name: Aligner l'alias de chaque modèle de service
+  ansible.builtin.uri:
+    url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
+    method: POST
+    headers: "{{ _centreon_hosts_headers }}"
+    body_format: json
+    body:
+      action: setparam
+      object: STPL
+      values: >-
+        {{ centreon_hosts_service_prefix }}{{ item.nom }};alias;{{ item.description }}
+    return_content: true
+    timeout: "{{ centreon_hosts_api_timeout }}"
+  loop: "{{ centreon_hosts_services }}"
+  loop_control:
+    label: "{{ item.nom }} -> {{ item.description }}"
+  changed_when: false
+
 - name: Régler la commande de chaque modèle de service
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -261,6 +318,7 @@
 - name: Poser les réglages de chaque modèle de service
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -279,6 +337,7 @@
 - name: Poser la période de contrôle de chaque modèle de service
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -297,6 +356,7 @@
 - name: Poser le mode du plugin sur chaque modèle de service
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -318,6 +378,7 @@
 - name: Rattacher les modèles de services au modèle d'hôte
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -344,6 +405,7 @@
 - name: Relever les services attachés aux hôtes
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -373,6 +435,7 @@
 - name: Renommer ces services vers la description en vigueur
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json

@@ -7,13 +7,53 @@
 # C'était le défaut le plus grave de ce rôle : sans cette garde, superviser
 # un parc stable revenait à interrompre la collecte à chaque exécution.
 
+# Comparer ce qui est déclaré à ce qui est réellement déployé. Sans cela, le
+# rôle ne regardait que ce que le passage courant venait de modifier : un hôte
+# créé lors d'une exécution dont la génération a échoué n'était plus jamais
+# rattrapé, et l'écart entre la base et le moteur devenait permanent sans que
+# rien ne le signale. C'est ce qui est arrivé, et il a fallu forcer le
+# déploiement à la main pour s'en apercevoir.
+- name: Relever la configuration réellement déployée vers le moteur
+  ansible.builtin.slurp:
+    src: /etc/centreon-engine/hosts.cfg
+  register: _centreon_hosts_deployee
+  failed_when: false
+  check_mode: false
+
+- name: Établir les hôtes déclarés que le moteur ne connaît pas encore
+  vars:
+    _contenu: "{{ (_centreon_hosts_deployee.content | default('') | b64decode) }}"
+  ansible.builtin.set_fact:
+    _centreon_hosts_non_deployes: >-
+      {{ (groups['monitored'] | default([]))
+         | reject('in', _contenu) | list }}
+
+- name: Signaler que le moteur est en retard sur la configuration déclarée
+  when: _centreon_hosts_non_deployes | default([]) | length > 0
+  ansible.builtin.debug:
+    msg: >-
+      Le moteur ne connaît pas encore
+      {{ _centreon_hosts_non_deployes | join(', ') }}, alors que ces hôtes sont
+      déclarés dans Centreon. La configuration va donc être générée et
+      déployée, même si ce passage n'a rien modifié.
+
 - name: Déterminer si la configuration a réellement changé
   ansible.builtin.set_fact:
+    # Cette liste doit couvrir tout ce que le rôle peut changer, pas seulement
+    # les hôtes et les macros. Un modèle de service créé, un alias réaligné ou
+    # un service renommé modifie la configuration autant qu'un nouvel hôte, et
+    # les omettre laissait ces corrections dans la base sans jamais les
+    # déployer vers le moteur.
+
     _centreon_hosts_config_changed: >-
       {{ (_centreon_hosts_new_hosts | default([]) | length > 0)
          or (_centreon_hosts_hg_created is defined and _centreon_hosts_hg_created is changed)
          or (_centreon_hosts_public_macros_set is defined and _centreon_hosts_public_macros_set is changed)
-         or (_centreon_hosts_secret_macros_set is defined and _centreon_hosts_secret_macros_set is changed) }}
+         or (_centreon_hosts_secret_macros_set is defined and _centreon_hosts_secret_macros_set is changed)
+         or (_centreon_hosts_stpl_crees is defined and _centreon_hosts_stpl_crees is changed)
+         or (_centreon_hosts_alias_desalignes | default([]) | length > 0)
+         or (_centreon_hosts_renommages | default([]) | length > 0)
+         or (_centreon_hosts_non_deployes | default([]) | length > 0) }}
 
 - name: Expliquer pourquoi le collecteur n'est pas rechargé
   when: not (_centreon_hosts_config_changed | bool or centreon_hosts_force_apply | bool)
@@ -31,6 +71,7 @@
   when: _centreon_hosts_config_changed | bool or centreon_hosts_force_apply | bool
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_v2_url }}/login"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     body_format: json
     body:
@@ -48,6 +89,7 @@
   when: _centreon_hosts_config_changed | bool or centreon_hosts_force_apply | bool
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_v2_url }}/configuration/monitoring-servers/generate-and-reload"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: GET
     headers:
       X-AUTH-TOKEN: "{{ _centreon_hosts_session_v2.json.security.token }}"

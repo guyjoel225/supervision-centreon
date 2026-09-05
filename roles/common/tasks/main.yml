@@ -57,6 +57,63 @@
                and 'Could not find the requested service'
                    in (_common_ntp_started.msg | default('')))
 
+# Le bloc géré ci-dessous corrige ce qu'il contient, mais reste aveugle à ce
+# qui l'entoure. Une entrée écrite à la main avant un changement d'adresse
+# survit ainsi indéfiniment, et fait résoudre un nom vers une machine qui
+# n'existe plus. Le cas s'est produit : l'ancienne adresse du serveur central,
+# antérieure à sa réinstallation, subsistait sous un autre nom.
+#
+# Ces entrées ne sont pas supprimées. Une entrée manuelle peut avoir une raison
+# d'être que l'inventaire ignore, et supprimer d'autorité une résolution de nom
+# sur un serveur en service casserait ce qui en dépend, sans alerte. Elles sont
+# donc relevées et nommées, la décision revenant à l'exploitant.
+- name: Relever les entrées de /etc/hosts écrites hors du bloc géré
+  when: common_manage_hosts_file | bool
+  ansible.builtin.slurp:
+    src: /etc/hosts
+  register: _common_hosts_actuel
+  check_mode: false
+
+- name: Repérer les résolutions périmées du réseau de supervision
+  when: common_manage_hosts_file | bool
+  vars:
+    # Le fichier privé de ses commentaires et du bloc géré : ne restent que
+    # les entrées écrites à la main.
+    # « splitlines » et non « split », le second cherchant dans un bloc YAML la
+    # chaîne littérale contre-oblique suivie de n, jamais un saut de ligne :
+    # tout ce qui suit le bloc géré serait alors traité comme une seule ligne.
+    _hors_bloc: >-
+      {{ (_common_hosts_actuel.content | b64decode).split('# BEGIN SUPERVISION CENTREON')[0].splitlines()
+         + ((_common_hosts_actuel.content | b64decode).split('# END SUPERVISION CENTREON - géré par Ansible')[1:] | join('')).splitlines() }}
+    _adresses_connues: >-
+      {{ groups['all'] | map('extract', hostvars, 'ansible_host') | select | list }}
+    # Le réseau des hôtes supervisés, déduit de leurs adresses.
+    _prefixes: >-
+      {{ _adresses_connues | map('regex_replace', '^(\d+\.\d+\.\d+)\.\d+$', '\1.') | unique | list }}
+  ansible.builtin.set_fact:
+    _common_hosts_perimees: >-
+      {{ _hors_bloc
+         | reject('match', '^\s*#')
+         | reject('match', '^\s*$')
+         | select('search', '(' ~ (_prefixes | map('regex_escape') | join('|')) ~ ')')
+         | reject('search', '(' ~ (_adresses_connues | map('regex_escape') | join('|')) ~ ')\s')
+         | list }}
+
+- name: Signaler les résolutions périmées plutôt que de les effacer
+  when:
+    - common_manage_hosts_file | bool
+    - _common_hosts_perimees | default([]) | length > 0
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} porte dans /etc/hosts, hors du bloc géré par ce
+      rôle, {{ _common_hosts_perimees | length }} entrée(s) désignant une
+      adresse du réseau de supervision qui n'appartient à aucun hôte de
+      l'inventaire :
+      {{ _common_hosts_perimees | map('trim') | join(' | ') }}.
+      Elles ne sont pas modifiées. Si elles datent d'un changement d'adresse,
+      elles font résoudre un nom vers une machine qui n'existe plus ; si elles
+      désignent une machine étrangère à l'inventaire, elles sont légitimes.
+
 - name: Déclarer les hôtes de l'inventaire dans /etc/hosts
   when: common_manage_hosts_file | bool
   ansible.builtin.blockinfile:
