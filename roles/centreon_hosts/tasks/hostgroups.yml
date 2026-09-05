@@ -2,6 +2,7 @@
 - name: Lister les groupes d'hôtes existants
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -16,6 +17,7 @@
 - name: Créer les groupes d'hôtes manquants
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json

@@ -1,18 +1,28 @@
 ---
 # Variables propres au serveur central en production.
 
-# SELinux reste en permissive faute de politique dédiée à Centreon. C'est une
-# réduction du niveau de sécurité, assumée et à corriger : voir la liste des
-# points bloquants pour une vraie mise en production, dans le README.
-centreon_selinux_state: permissive
+# SELinux passe en enforcing une fois la plateforme en marche. Le rôle
+# installe les politiques publiées par Centreon, pose les booléens
+# nécessaires, redémarre, observe une minute, puis relève les accès refusés.
+# S'il y en a, ou si l'interface cesse de répondre, il revient de lui-même en
+# permissive et le dit : une supervision aveugle est un incident plus grave
+# qu'une politique non appliquée.
+centreon_selinux_state: enforcing
 centreon_manage_firewall: true
 centreon_run_web_installer: true
 centreon_send_statistics: false
 
-# Exposition de l'interface web. Le protocole reste http faute de certificat :
-# c'est le premier point à traiter avant une exploitation réelle.
-centreon_web_protocol: http
-centreon_web_port: 80
+# Exposition de l'interface web. En HTTPS, avec redirection du trafic en
+# clair : sans cela, les identifiants et le jeton de session circulent en
+# clair sur le réseau.
+#
+# Aucun certificat n'étant fourni, le rôle en produit un auto-signé : il
+# chiffre le transport mais n'authentifie pas le serveur, et les navigateurs
+# le signaleront. Pour aller au bout, renseigner centreon_web_tls_certificate
+# et centreon_web_tls_key depuis le coffre, avec un certificat signé par une
+# autorité reconnue du parc, puis passer centreon_web_validate_certs à true.
+centreon_web_protocol: https
+centreon_web_port: 443
 centreon_web_admin_login: admin
 
 # Point d'entrée de l'API de configuration, utilisé hors des rôles.

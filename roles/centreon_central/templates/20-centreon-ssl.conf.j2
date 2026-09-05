@@ -1,0 +1,28 @@
+{{ ansible_managed | comment }}
+#
+# Hôte virtuel chiffré de l'interface Centreon.
+#
+# Centreon déclare ses alias, son mandataire PHP et ses répertoires à
+# l'intérieur de son propre hôte virtuel sur le port 80. Un hôte virtuel sur
+# le port 443 n'en hérite donc rien, et servait une erreur 404 : c'est ce que
+# le fichier livré par mod_ssl produisait, faute de connaître Centreon.
+#
+# Le corps ci-dessous est repris de /etc/httpd/conf.d/10-centreon.conf tel
+# qu'il s'y trouve, sans être réécrit. Le rôle le relit à chaque exécution :
+# une mise à jour de Centreon qui changerait ce fichier sera donc suivie, à
+# condition de rejouer le rôle.
+#
+# Le nom de ce fichier commande son rang de chargement, et ce rang compte
+# deux fois : après 10-centreon.conf, dont les directives « Define » doivent
+# déjà être en vigueur ; avant ssl.conf, pour que cet hôte virtuel devienne
+# celui qui répond par défaut sur le port 443.
+
+<VirtualHost *:443>
+    ServerName {{ centreon_central_tls_common_name }}
+
+    SSLEngine on
+    SSLCertificateFile {{ centreon_central_tls_certificate_path }}
+    SSLCertificateKeyFile {{ centreon_central_tls_key_path }}
+
+{{ _centreon_central_vhost_corps }}
+</VirtualHost>

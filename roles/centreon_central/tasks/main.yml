@@ -58,23 +58,32 @@
 # cascade. Une simulation ne peut donc rien prouver sur une installation
 # initiale, et le rôle s'arrête ici en le disant, plutôt que de produire une
 # erreur qui désigne les paquets alors que la cause est le mode d'exécution.
+# La simulation s'arrête ici dans les deux cas, mais pour deux raisons
+# différentes, et le message le dit plutôt que de laisser survenir une erreur
+# qui désignerait le mauvais coupable.
 - name: Expliquer pourquoi la simulation s'arrête ici
-  when:
-    - ansible_check_mode
-    - not _centreon_central_deja_installe.stat.exists
+  when: ansible_check_mode
   ansible.builtin.debug:
     msg: >-
+      {% if not _centreon_central_deja_installe.stat.exists %}
       Simulation interrompue sur {{ inventory_hostname }} : le dépôt Centreon
       n'a pas été réellement déclaré, puisque c'est justement ce que la
       simulation évite de faire. Aucun paquet ne peut donc être trouvé, ni
       rien de ce qui en dépend être évalué. Les étapes vérifiées jusqu'ici
       restent valables : plateforme, secrets, machine dédiée, dépôts et
       modules. Relancer sans --check pour aller plus loin.
+      {% else %}
+      Simulation interrompue sur {{ inventory_hostname }} : la plateforme est
+      déjà installée, et tout ce qui suit passe par son interface de
+      programmation, que la simulation n'interroge pas. Les registres seraient
+      vides et les conclusions fausses, comme l'a montré un comptage de tables
+      tombé à zéro sur une base intacte. Les étapes vérifiées jusqu'ici
+      restent valables. Relancer sans --check pour poser le TLS, la sauvegarde
+      et le durcissement SELinux.
+      {% endif %}
 
 - name: Terminer la simulation pour cette machine
-  when:
-    - ansible_check_mode
-    - not _centreon_central_deja_installe.stat.exists
+  when: ansible_check_mode
   ansible.builtin.meta: end_host
 
 - name: Installer les paquets Centreon
@@ -99,6 +108,30 @@
   ansible.builtin.include_tasks: web_installer.yml
   tags: [centreon_installer]
 
+# Le TLS est posé après l'assistant d'installation, qui se déroule en clair
+# sur la machine elle-même, et avant que le rôle centreon_hosts n'appelle
+# l'interface de programmation : celui-ci la joindra donc déjà chiffrée.
+- name: Servir l'interface en HTTPS
+  when: centreon_central_tls_enabled | bool
+  ansible.builtin.include_tasks: tls.yml
+
 - name: Installer les plugins de supervision
   ansible.builtin.include_tasks: plugins.yml
+
+# La sauvegarde est posée avant le durcissement : si SELinux devait poser
+# problème, la plateforme aurait déjà une sauvegarde vérifiée.
+- name: Automatiser la sauvegarde de la plateforme
+  when:
+    - not ansible_check_mode
+    - centreon_central_backup_enabled | bool
+  ansible.builtin.include_tasks: backup.yml
+
+# Le durcissement vient en dernier, quand la plateforme est installée,
+# démarrée et joignable : c'est la seule position d'où l'on peut juger qu'il
+# n'a rien cassé.
+- name: Durcir SELinux une fois la plateforme en marche
+  when:
+    - not ansible_check_mode
+    - centreon_central_selinux_state != centreon_central_selinux_install_state
+  ansible.builtin.include_tasks: selinux.yml
   tags: [centreon_plugins]

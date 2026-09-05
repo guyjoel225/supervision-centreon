@@ -1,0 +1,21 @@
+{{ ansible_managed | comment }}
+#
+# Redirige le trafic en clair vers le canal chiffré.
+#
+# Ce fichier est nommé pour être chargé avant ceux que livrent Centreon et
+# mod_ssl : le premier hôte virtuel déclaré pour un port en devient l'hôte par
+# défaut, donc celui qui reçoit les requêtes ne correspondant à aucun autre.
+#
+# La redirection est permanente et porte sur la totalité du chemin. Aucune
+# exception n'est prévue : laisser une seule route en clair suffirait à y voir
+# passer un jeton de session.
+
+<VirtualHost *:80>
+    ServerName {{ centreon_central_tls_common_name }}
+
+    RedirectPermanent / https://{{ centreon_central_tls_common_name }}{% if centreon_central_web_port | int != 443 %}:{{ centreon_central_web_port }}{% endif %}/
+
+    # Le serveur ne divulgue ni sa version ni son système sur les pages
+    # d'erreur qu'il produit avant la redirection.
+    ServerSignature Off
+</VirtualHost>

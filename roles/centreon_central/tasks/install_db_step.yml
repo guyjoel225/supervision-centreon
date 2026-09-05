@@ -10,6 +10,7 @@
 - name: "Exécuter l'étape {{ _centreon_central_etape }}"
   ansible.builtin.uri:
     url: "{{ _centreon_central_install_base }}/steps/process/{{ _centreon_central_etape }}"
+    validate_certs: "{{ centreon_central_web_validate_certs }}"
     method: POST
     body_format: form-urlencoded
     body: {}

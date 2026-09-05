@@ -6,6 +6,7 @@
 - name: Poser les paramètres d'authentification du plugin
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -26,6 +27,7 @@
 - name: Relever les macros déjà posées sur chaque hôte
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -53,6 +55,7 @@
 - name: Poser les macros SNMP v3 non sensibles
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -80,6 +83,7 @@
 - name: Poser les passphrases SNMP v3
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json
@@ -102,6 +106,7 @@
 - name: Appliquer le modèle d'hôte aux hôtes nouvellement créés
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=action&object=centreon_clapi"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     headers: "{{ _centreon_hosts_headers }}"
     body_format: json

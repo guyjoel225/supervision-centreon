@@ -1,0 +1,237 @@
+---
+# ===================================================================
+# Sert l'interface de Centreon en HTTPS.
+#
+# Sans cela, les identifiants de connexion et le jeton de l'interface de
+# programmation circulent en clair sur le réseau, y compris ceux du compte
+# administrateur. C'est le premier des cinq points qui séparaient cette
+# plateforme d'une véritable mise en production.
+#
+# Deux cas sont servis. En production, le certificat et sa clé sont fournis
+# par le coffre : ils authentifient le serveur autant qu'ils chiffrent le
+# transport. À défaut, un certificat auto-signé est produit sur place : il
+# chiffre, mais n'authentifie pas, et les navigateurs le signaleront. Le rôle
+# le dit plutôt que de laisser croire à une mise en conformité.
+# ===================================================================
+
+- name: Installer le module TLS du serveur web
+  ansible.builtin.dnf:
+    name: mod_ssl
+    state: present
+
+- name: Créer le répertoire des certificats de la supervision
+  ansible.builtin.file:
+    path: "{{ centreon_central_tls_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+# ------------------------------------------------------------------
+# Certificat fourni par l'exploitant
+# ------------------------------------------------------------------
+
+- name: Déposer le certificat fourni
+  when: centreon_central_tls_certificate_content | length > 0
+  ansible.builtin.copy:
+    content: "{{ centreon_central_tls_certificate_content }}"
+    dest: "{{ centreon_central_tls_certificate_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Redemarrer httpd
+
+- name: Déposer la clé privée fournie
+  when: centreon_central_tls_key_content | length > 0
+  ansible.builtin.copy:
+    content: "{{ centreon_central_tls_key_content }}"
+    dest: "{{ centreon_central_tls_key_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Redemarrer httpd
+
+# ------------------------------------------------------------------
+# Certificat auto-signé, à défaut
+# ------------------------------------------------------------------
+
+# « creates » porte l'idempotence : le certificat n'est pas régénéré à chaque
+# exécution, ce qui invaliderait la confiance accordée par les navigateurs et
+# ferait échouer les clients qui l'ont épinglé.
+- name: Produire un certificat auto-signé, faute de certificat fourni
+  when: centreon_central_tls_certificate_content | length == 0
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -x509 -nodes
+      -newkey rsa:4096
+      -days {{ centreon_central_tls_self_signed_days }}
+      -keyout {{ centreon_central_tls_key_path }}
+      -out {{ centreon_central_tls_certificate_path }}
+      -subj "/CN={{ centreon_central_tls_common_name }}"
+      -addext "subjectAltName={{ centreon_central_tls_subject_alt_name }}"
+    creates: "{{ centreon_central_tls_certificate_path }}"
+  notify: Redemarrer httpd
+
+- name: Restreindre la clé du certificat auto-signé
+  when: centreon_central_tls_certificate_content | length == 0
+  ansible.builtin.file:
+    path: "{{ centreon_central_tls_key_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Avertir qu'un certificat auto-signé n'authentifie pas le serveur
+  when: centreon_central_tls_certificate_content | length == 0
+  ansible.builtin.debug:
+    msg: >-
+      Le certificat servi par {{ inventory_hostname }} est auto-signé. Le
+      transport est chiffré, mais rien ne prouve au navigateur qu'il parle au
+      bon serveur, et une interception resterait possible pour qui se place sur
+      le chemin. Pour une véritable mise en production, fournir un certificat
+      signé par une autorité reconnue du parc, dans
+      centreon_central_tls_certificate_content et sa clé.
+
+# ------------------------------------------------------------------
+# Configuration du serveur web
+# ------------------------------------------------------------------
+
+# Centreon déclare ses alias, son mandataire PHP et ses répertoires à
+# l'intérieur de son propre hôte virtuel sur le port 80. L'hôte virtuel livré
+# par mod_ssl n'en hérite rien : il répond en HTTPS, mais par une erreur 404.
+# Le corps du premier est donc repris dans un hôte virtuel chiffré, plutôt que
+# réécrit à la main, ce qui divergerait à la première mise à jour.
+- name: Relever la configuration Apache de Centreon
+  ansible.builtin.slurp:
+    src: /etc/httpd/conf.d/10-centreon.conf
+  register: _centreon_central_vhost_source
+  check_mode: false
+
+- name: Extraire le corps de l'hôte virtuel de Centreon
+  vars:
+    _fichier: "{{ _centreon_central_vhost_source.content | b64decode }}"
+  ansible.builtin.set_fact:
+    _centreon_central_vhost_corps: >-
+      {{ (_fichier.split('<VirtualHost *:80>')[1]).split('</VirtualHost>')[0]
+         if '<VirtualHost *:80>' in _fichier else '' }}
+
+- name: Refuser de servir un hôte virtuel chiffré vide
+  ansible.builtin.assert:
+    that:
+      - _centreon_central_vhost_corps | length > 50
+      - "'Alias' in _centreon_central_vhost_corps"
+    fail_msg: >-
+      Le corps de l'hôte virtuel de Centreon n'a pas pu être relevé dans
+      /etc/httpd/conf.d/10-centreon.conf. Servir un hôte virtuel chiffré vide
+      renverrait une erreur 404 sur toute l'interface, ce qui est pire que de
+      s'arrêter ici.
+    quiet: true
+
+- name: Servir l'interface Centreon sur le canal chiffré
+  ansible.builtin.template:
+    src: 20-centreon-ssl.conf.j2
+    dest: /etc/httpd/conf.d/20-centreon-ssl.conf
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Redemarrer httpd
+
+- name: Désigner le certificat de la supervision au serveur web
+  ansible.builtin.lineinfile:
+    path: /etc/httpd/conf.d/ssl.conf
+    regexp: "^\\s*SSLCertificateFile\\s"
+    line: "SSLCertificateFile {{ centreon_central_tls_certificate_path }}"
+    insertafter: "^\\s*<VirtualHost"
+    backup: true
+  notify: Redemarrer httpd
+
+- name: Désigner la clé du certificat au serveur web
+  ansible.builtin.lineinfile:
+    path: /etc/httpd/conf.d/ssl.conf
+    regexp: "^\\s*SSLCertificateKeyFile\\s"
+    line: "SSLCertificateKeyFile {{ centreon_central_tls_key_path }}"
+    insertafter: "^\\s*SSLCertificateFile\\s"
+    backup: true
+  notify: Redemarrer httpd
+
+# Un fragment de conf.d ne peut pas être validé isolément : « httpd -t -f »
+# le traite comme configuration principale, sans module chargé, et refuse
+# jusqu'au fichier le plus correct faute de MPM. La validation porte donc sur
+# la configuration complète, après dépôt, et le fichier est retiré si elle ne
+# passe pas : mieux vaut pas de redirection qu'un serveur web qui ne démarre
+# plus.
+- name: Rediriger le trafic en clair vers le canal chiffré
+  when: centreon_central_tls_redirect_http | bool
+  ansible.builtin.template:
+    src: 00-centreon-tls-redirect.conf.j2
+    dest: /etc/httpd/conf.d/00-centreon-tls-redirect.conf
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Redemarrer httpd
+
+- name: Éprouver la configuration complète du serveur web
+  when: centreon_central_tls_redirect_http | bool
+  ansible.builtin.command:
+    cmd: /usr/sbin/httpd -t
+  register: _centreon_central_httpd_valide
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Retirer la redirection si elle casse la configuration
+  when:
+    - centreon_central_tls_redirect_http | bool
+    - _centreon_central_httpd_valide.rc != 0
+  block:
+
+    - name: Supprimer le fichier de redirection fautif
+      ansible.builtin.file:
+        path: /etc/httpd/conf.d/00-centreon-tls-redirect.conf
+        state: absent
+
+    - name: Refuser de poursuivre avec une configuration invalide
+      ansible.builtin.fail:
+        msg: >-
+          La redirection du trafic en clair rendait la configuration du serveur
+          web invalide sur {{ inventory_hostname }}, elle a donc été retirée :
+          {{ _centreon_central_httpd_valide.stderr | default('') | trim }}.
+          L'interface reste servie, en clair sur le port 80 et chiffrée sur le
+          port {{ centreon_central_web_port }}. Corriger la cause avant de
+          relancer, ou désactiver la redirection avec
+          centreon_central_tls_redirect_http=false.
+
+# Les modifications doivent être effectives avant la vérification qui suit,
+# et avant que le rôle centreon_hosts n'appelle l'interface de programmation.
+- name: Appliquer la configuration du serveur web maintenant
+  ansible.builtin.meta: flush_handlers
+
+# ------------------------------------------------------------------
+# Preuve
+# ------------------------------------------------------------------
+
+- name: Vérifier que l'interface répond en HTTPS
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ centreon_central_web_port }}/centreon/"
+    method: GET
+    validate_certs: "{{ centreon_central_web_validate_certs }}"
+    status_code: [200, 302, 401]
+    timeout: 20
+  register: _centreon_central_tls_reponse
+  retries: 5
+  delay: 3
+  until: _centreon_central_tls_reponse is succeeded
+
+- name: Confirmer que le canal chiffré est en service
+  ansible.builtin.debug:
+    msg: >-
+      L'interface de {{ inventory_hostname }} répond en HTTPS sur le port
+      {{ centreon_central_web_port }}
+      ({{ 'certificat fourni par l exploitant'
+          if centreon_central_tls_certificate_content | length > 0
+          else 'certificat auto-signé' }}).
+      {{ 'Le trafic en clair est redirigé vers le canal chiffré.'
+         if centreon_central_tls_redirect_http | bool
+         else 'Le port 80 reste servi en clair : redirection désactivée.' }}

@@ -43,7 +43,45 @@ centreon_central_langpacks:
 # les journaux d'audit remonter sans bloquer, ce qui est préférable pour
 # préparer un futur passage en enforcing avec une politique dédiée.
 # Valeurs acceptées : disabled, permissive, enforcing.
-centreon_central_selinux_state: "{{ centreon_selinux_state | default('permissive') }}"
+# État SELinux visé une fois la plateforme installée et en état de marche.
+# Valeurs acceptées : disabled, permissive, enforcing.
+#
+# Le défaut est « enforcing ». La machine qui supervise le parc détient les
+# identifiants d'accès à toutes les autres : la laisser sans protection
+# obligatoire au motif que Centreon documente une installation SELinux
+# désactivé revient à faire du superviseur le maillon le plus faible.
+centreon_central_selinux_state: "{{ centreon_selinux_state | default('enforcing') }}"
+
+# État pendant l'installation. Durcir avant que la plateforme fonctionne
+# reviendrait à diagnostiquer deux problèmes à la fois : les refus SELinux
+# sont journalisés sans bloquer, et le durcissement vient après.
+centreon_central_selinux_install_state: "{{ centreon_selinux_install_state | default('permissive') }}"
+
+# Booléens dont la plateforme a besoin. Le serveur web appelle l'interface de
+# programmation, le démon de communication et la base : sans cette
+# autorisation, l'interface se charge mais reste vide.
+centreon_central_selinux_booleans:
+  - httpd_can_network_connect
+  - httpd_can_network_connect_db
+  - daemons_enable_cluster_mode
+
+centreon_central_selinux_services_a_relancer:
+  - php-fpm
+  - httpd
+  - cbd
+  - centengine
+  - gorgoned
+
+# Durée d'observation avant de juger le durcissement. Un service peut démarrer
+# puis s'écrouler à son premier travail périodique : douze secondes ne prouvent
+# rien.
+centreon_central_selinux_delai_observation: 60
+
+# Revient en permissive si le durcissement a provoqué des refus ou rendu
+# l'interface muette. Une plateforme de supervision aveugle est un incident
+# plus grave qu'une politique non appliquée, et ce choix ne doit pas se faire
+# en silence. Passer à false pour exiger le durcissement quoi qu'il en coûte.
+centreon_central_selinux_revenir_si_refus: true
 
 # Change le nom d'hôte de la machine.
 #
@@ -118,8 +156,56 @@ centreon_central_db_harden: true
 centreon_central_reset_incomplete_install: false
 
 centreon_central_run_web_installer: "{{ centreon_run_web_installer | default(true) }}"
-centreon_central_web_protocol: "{{ centreon_web_protocol | default('http') }}"
-centreon_central_web_port: "{{ centreon_web_port | default(80) }}"
+# Le protocole gouverne tout le reste : le port par défaut, l'activation du
+# TLS sur le serveur web, et l'adresse à laquelle le rôle centreon_hosts
+# appellera l'interface de programmation. Une seule variable à poser, donc,
+# plutôt que trois qui pourraient diverger.
+#
+# La valeur par défaut est « https ». Servir l'interface en clair expose les
+# identifiants et le jeton de session à quiconque écoute le réseau ; le dépôt
+# ne le propose plus par défaut, mais le permet toujours en posant « http »,
+# ce qui reste utile pour un laboratoire fermé.
+centreon_central_web_protocol: "{{ centreon_web_protocol | default('https') }}"
+centreon_central_web_port: >-
+  {{ centreon_web_port
+     | default(443 if (centreon_web_protocol | default('https')) == 'https' else 80) }}
+
+# ===================================================================
+# Transport chiffré
+# ===================================================================
+
+centreon_central_tls_enabled: "{{ centreon_central_web_protocol == 'https' }}"
+centreon_central_tls_directory: /etc/pki/centreon
+centreon_central_tls_certificate_path: "{{ centreon_central_tls_directory }}/centreon.crt"
+centreon_central_tls_key_path: "{{ centreon_central_tls_directory }}/centreon.key"
+
+# Certificat et clé, à fournir par le coffre pour une véritable mise en
+# production : eux seuls authentifient le serveur. Laissés vides, un
+# certificat auto-signé est produit, qui chiffre sans authentifier, et le rôle
+# le signale explicitement plutôt que de laisser croire le contraire.
+centreon_central_tls_certificate_content: "{{ centreon_web_tls_certificate | default('') }}"
+centreon_central_tls_key_content: "{{ centreon_web_tls_key | default('') }}"
+
+# 825 jours est la durée maximale que les navigateurs acceptent encore pour un
+# certificat de serveur. Au-delà, ils le refusent quelle que soit sa signature.
+centreon_central_tls_self_signed_days: 825
+
+centreon_central_tls_common_name: "{{ centreon_web_tls_common_name | default(ansible_host) }}"
+centreon_central_tls_subject_alt_name: >-
+  {{ centreon_web_tls_subject_alt_name
+     | default('IP:' ~ ansible_host ~ ',DNS:' ~ inventory_hostname) }}
+
+# Un certificat auto-signé ne peut pas être validé : la vérification échouerait
+# sur le certificat que le rôle vient lui-même de produire. Dès qu'un
+# certificat signé par une autorité du parc est fourni, passer cette variable
+# à true, sans quoi la validation ne sert à rien.
+centreon_central_web_validate_certs: >-
+  {{ centreon_web_validate_certs
+     | default(centreon_central_tls_certificate_content | length > 0) }}
+
+# Redirige le port 80 vers le port chiffré. Laisser une seule route en clair
+# suffirait à y voir passer un jeton de session.
+centreon_central_tls_redirect_http: "{{ centreon_web_tls_redirect_http | default(true) }}"
 
 centreon_central_web_admin_login: "{{ centreon_web_admin_login | default('admin') }}"
 # Contrainte imposée par Centreon : au moins 12 caractères, avec au moins
@@ -167,3 +253,56 @@ centreon_central_services:
   - centreontrapd
   - snmpd
   - crond
+
+# ===================================================================
+# Sauvegarde
+# ===================================================================
+
+centreon_central_backup_enabled: "{{ centreon_backup_enabled | default(true) }}"
+centreon_central_backup_directory: /var/backups/centreon
+centreon_central_backup_script_path: /usr/local/sbin/centreon-backup
+centreon_central_backup_state_file: /var/lib/centreon-backup.state
+centreon_central_backup_mysql_options_file: /root/.centreon-backup.cnf
+
+# Les deux bases comptent. « centreon » porte la configuration du parc,
+# « centreon_storage » les métriques et l'historique des états : restaurer la
+# première sans la seconde laisse une plateforme qui fonctionne mais qui a
+# tout oublié de ce qu'elle a mesuré.
+centreon_central_backup_databases:
+  - centreon
+  - centreon_storage
+
+# engine-context.json porte les clés de chiffrement partagées entre
+# l'interface et le moteur. Une base restaurée sans elles ne produirait plus
+# aucune configuration, et l'erreur ne nommerait pas la cause.
+centreon_central_backup_paths:
+  - /etc/centreon
+  - /etc/centreon-engine
+  - /etc/centreon-broker
+  - /etc/centreon-gorgone
+  - /usr/share/centreon/.env
+
+# Le compte de sauvegarde est celui de l'installation, qui a déjà les droits
+# de lecture sur les deux bases. Lui en créer un autre ajouterait un secret à
+# gérer sans rien protéger de plus.
+centreon_central_backup_mysql_user: "{{ centreon_central_db_admin_user }}"
+centreon_central_backup_mysql_password: "{{ centreon_central_db_admin_password }}"
+
+centreon_central_backup_retention_days: 14
+centreon_central_backup_compression_level: 6
+
+# Une sauvegarde de Centreon plus petite que cela ne peut pas être valide :
+# le schéma seul pèse davantage. Ce seuil attrape les archives vides, qui se
+# lisent sans erreur et ne se découvrent qu'à la restauration.
+centreon_central_backup_taille_minimale: 51200
+
+# Tous les jours à 2h30, en dehors des heures ouvrées. « Persistent » rattrape
+# la sauvegarde si la machine était éteinte à cette heure.
+centreon_central_backup_schedule: "*-*-* 02:30:00"
+centreon_central_backup_randomized_delay: 900
+centreon_central_backup_timeout: 3600
+
+# Exécute une sauvegarde pendant le déploiement et vérifie ce qu'elle produit.
+# Sans cela, le rôle ne prouverait rien : il aurait seulement programmé une
+# tâche dont personne ne sait si elle fonctionne.
+centreon_central_backup_run_now: true

@@ -66,6 +66,7 @@
     - name: Interroger cette page par le serveur web
       ansible.builtin.uri:
         url: "{{ centreon_web_protocol | default('http') }}://{{ ansible_host }}:{{ centreon_web_port | default(80) }}/centreon/diag-limites.php"
+        validate_certs: "{{ centreon_web_validate_certs | default((centreon_web_tls_certificate | default('')) | length > 0) }}"
         return_content: true
       register: _diag_limites_web
       changed_when: false

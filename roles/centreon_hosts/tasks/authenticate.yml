@@ -2,6 +2,7 @@
 - name: Obtenir un jeton d'authentification
   ansible.builtin.uri:
     url: "{{ centreon_hosts_api_url }}?action=authenticate"
+    validate_certs: "{{ centreon_hosts_validate_certs }}"
     method: POST
     body_format: form-urlencoded
     body:
