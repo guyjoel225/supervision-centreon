@@ -1,0 +1,16 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Déclenchement périodique de la sauvegarde du central Centreon
+
+[Timer]
+OnCalendar={{ centreon_central_backup_schedule }}
+# Rattrape la sauvegarde si la machine était éteinte à l'heure prévue. Sans
+# cela, une machine arrêtée la nuit ne serait jamais sauvegardée.
+Persistent=true
+# Étale le déclenchement pour ne pas faire partir toutes les sauvegardes du
+# parc à la même seconde.
+RandomizedDelaySec={{ centreon_central_backup_randomized_delay }}
+Unit=centreon-backup.service
+
+[Install]
+WantedBy=timers.target

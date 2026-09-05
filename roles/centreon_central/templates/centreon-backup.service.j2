@@ -1,0 +1,23 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Sauvegarde du serveur central Centreon
+Documentation=file://{{ centreon_central_backup_script_path }}
+# La sauvegarde n'a aucun sens si la base n'est pas levée : la faire attendre
+# évite une archive vide au démarrage de la machine.
+Requires=mariadb.service
+After=mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart={{ centreon_central_backup_script_path }}
+User=root
+Group=root
+# La sauvegarde ne doit pas priver la supervision de ses ressources : elle
+# passe après tout le reste pour le disque comme pour le processeur.
+IOSchedulingClass=idle
+Nice=10
+# Une sauvegarde qui ne rend pas la main empêcherait la suivante de partir.
+TimeoutStartSec={{ centreon_central_backup_timeout }}
+
+[Install]
+WantedBy=multi-user.target

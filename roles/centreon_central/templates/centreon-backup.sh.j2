@@ -1,0 +1,116 @@
+#!/bin/bash
+{{ ansible_managed | comment }}
+#
+# Sauvegarde du serveur central Centreon.
+#
+# Sauvegarde la configuration ET les métriques, parce que perdre les secondes
+# sans les premières laisse une plateforme qui fonctionne mais ne sait plus ce
+# qu'elle a mesuré, ce qui est précisément ce qu'on demande à une supervision.
+#
+# Le script échoue bruyamment plutôt que de produire une archive incomplète :
+# une sauvegarde dont on découvre le jour de la restauration qu'elle était
+# vide est pire que pas de sauvegarde du tout, car on a cessé d'y penser.
+
+set -euo pipefail
+
+RACINE="{{ centreon_central_backup_directory }}"
+RETENTION={{ centreon_central_backup_retention_days }}
+OPTIONS_SQL="{{ centreon_central_backup_mysql_options_file }}"
+ETAT="{{ centreon_central_backup_state_file }}"
+HORODATAGE="$(date +%Y%m%d-%H%M%S)"
+DESTINATION="${RACINE}/${HORODATAGE}"
+
+journal() {
+    echo "[$(date '+%Y-%m-%dT%H:%M:%S%z')] $*"
+}
+
+# Tout échec, y compris au milieu d'un tube, laisse une trace exploitable et
+# n'écrase surtout pas le fichier d'état : la supervision continuera de voir
+# la date de la dernière sauvegarde réellement réussie, et alertera.
+en_cas_d_echec() {
+    local code=$?
+    journal "ÉCHEC de la sauvegarde (code ${code}). Archive partielle retirée."
+    rm -rf "${DESTINATION}"
+    exit "${code}"
+}
+trap en_cas_d_echec ERR
+
+journal "Début de la sauvegarde vers ${DESTINATION}"
+mkdir -p "${DESTINATION}"
+chmod 0700 "${DESTINATION}"
+
+# ------------------------------------------------------------------
+# Bases de données
+# ------------------------------------------------------------------
+# --single-transaction prend une vue cohérente sans poser de verrou : la
+# supervision continue d'écrire ses résultats pendant la sauvegarde. Sans
+# cela, le moteur se bloquerait sur une base verrouillée et perdrait des
+# contrôles, ce qui ferait de la sauvegarde elle-même une cause de panne.
+for base in {{ centreon_central_backup_databases | join(' ') }}; do
+    journal "Sauvegarde de la base ${base}"
+    mysqldump --defaults-extra-file="${OPTIONS_SQL}" \
+        --single-transaction \
+        --quick \
+        --routines \
+        --events \
+        --triggers \
+        --default-character-set=utf8mb4 \
+        "${base}" \
+        | gzip -{{ centreon_central_backup_compression_level }} \
+        > "${DESTINATION}/${base}.sql.gz"
+
+    # Une archive tronquée se lit sans erreur jusqu'à sa troncature : seule
+    # une vérification de bout en bout la détecte.
+    gzip -t "${DESTINATION}/${base}.sql.gz"
+
+    taille=$(stat -c %s "${DESTINATION}/${base}.sql.gz")
+    if [ "${taille}" -lt {{ centreon_central_backup_taille_minimale }} ]; then
+        journal "La sauvegarde de ${base} ne fait que ${taille} octets, ce qui ne peut pas être une base Centreon valide."
+        exit 1
+    fi
+    journal "Base ${base} sauvegardée (${taille} octets compressés)"
+done
+
+# ------------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------------
+# Les fichiers de configuration comptent autant que la base : engine-context.json
+# porte les clés de chiffrement partagées entre l'interface et le moteur, et une
+# base restaurée sans elles ne produirait plus aucune configuration.
+journal "Sauvegarde des fichiers de configuration"
+tar --create --gzip \
+    --file "${DESTINATION}/configuration.tar.gz" \
+    --absolute-names \
+    --warning=no-file-changed \
+{% for chemin in centreon_central_backup_paths %}
+    "{{ chemin }}"{% if not loop.last %} \{% endif %}
+
+{% endfor %}
+
+gzip -t "${DESTINATION}/configuration.tar.gz"
+journal "Configuration sauvegardée"
+
+# ------------------------------------------------------------------
+# Empreintes, rétention et état
+# ------------------------------------------------------------------
+# Les empreintes permettent de vérifier une archive des mois plus tard, y
+# compris après recopie sur un autre support.
+( cd "${DESTINATION}" && sha256sum ./* > SHA256SUMS )
+
+journal "Purge des sauvegardes de plus de ${RETENTION} jours"
+find "${RACINE}" -mindepth 1 -maxdepth 1 -type d -mtime "+${RETENTION}" -exec rm -rf {} +
+
+octets=$(du -sb "${DESTINATION}" | cut -f1)
+
+# Ce fichier est le point de contact avec la supervision : le service qui
+# surveille l'âge de la dernière sauvegarde le lit. Il n'est écrit qu'en cas
+# de succès complet.
+cat > "${ETAT}" <<FIN
+horodatage=${HORODATAGE}
+epoch=$(date +%s)
+chemin=${DESTINATION}
+octets=${octets}
+FIN
+chmod 0644 "${ETAT}"
+
+journal "Sauvegarde terminée : ${DESTINATION} (${octets} octets)"

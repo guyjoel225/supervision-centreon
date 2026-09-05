@@ -1,0 +1,139 @@
+---
+# ===================================================================
+# Sauvegarde automatisée du serveur central.
+#
+# Troisième des cinq points qui séparaient cette plateforme d'une véritable
+# mise en production. Une supervision sans sauvegarde tient tant que rien ne
+# casse : le jour où la base est perdue, ce sont des mois de métriques et
+# toute la configuration du parc qui disparaissent, et il faut tout
+# redéclarer à la main.
+#
+# Ce rôle ne se contente pas de programmer une sauvegarde : il en exécute une
+# immédiatement et vérifie ce qu'elle a produit. Une sauvegarde jamais
+# éprouvée n'est pas une sauvegarde, c'est une intention.
+# ===================================================================
+
+- name: Créer le répertoire des sauvegardes
+  ansible.builtin.file:
+    path: "{{ centreon_central_backup_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# Le mot de passe ne passe ni par la ligne de commande, où ps le rendrait
+# lisible par tout utilisateur de la machine, ni par une variable
+# d'environnement, que /proc expose de la même façon.
+- name: Déposer les identifiants de sauvegarde de la base
+  ansible.builtin.copy:
+    content: |
+      [client]
+      user={{ centreon_central_backup_mysql_user }}
+      password={{ centreon_central_backup_mysql_password }}
+    dest: "{{ centreon_central_backup_mysql_options_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Déposer le script de sauvegarde
+  ansible.builtin.template:
+    src: centreon-backup.sh.j2
+    dest: "{{ centreon_central_backup_script_path }}"
+    owner: root
+    group: root
+    mode: "0700"
+    validate: /bin/bash -n %s
+
+- name: Déclarer le service de sauvegarde
+  ansible.builtin.template:
+    src: centreon-backup.service.j2
+    dest: /etc/systemd/system/centreon-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recharger les unites systemd
+
+- name: Déclarer le déclenchement périodique
+  ansible.builtin.template:
+    src: centreon-backup.timer.j2
+    dest: /etc/systemd/system/centreon-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recharger les unites systemd
+
+- name: Prendre en compte les unités avant de les activer
+  ansible.builtin.meta: flush_handlers
+
+- name: Activer le déclenchement périodique de la sauvegarde
+  ansible.builtin.systemd_service:
+    name: centreon-backup.timer
+    enabled: true
+    state: started
+
+# ------------------------------------------------------------------
+# Preuve
+# ------------------------------------------------------------------
+
+# Programmer une sauvegarde ne prouve rien. Celle-ci est exécutée maintenant,
+# et ce qu'elle produit est vérifié : c'est la différence entre une sauvegarde
+# et une intention de sauvegarde.
+- name: Exécuter une première sauvegarde
+  when: centreon_central_backup_run_now | bool
+  ansible.builtin.command:
+    cmd: "{{ centreon_central_backup_script_path }}"
+  register: _centreon_central_backup_execution
+  changed_when: _centreon_central_backup_execution.rc == 0
+
+- name: Relever l'état laissé par la sauvegarde
+  when: centreon_central_backup_run_now | bool
+  ansible.builtin.slurp:
+    src: "{{ centreon_central_backup_state_file }}"
+  register: _centreon_central_backup_etat
+
+- name: Établir ce que la sauvegarde a produit
+  when: centreon_central_backup_run_now | bool
+  ansible.builtin.set_fact:
+    _centreon_central_backup_chemin: >-
+      {{ (_centreon_central_backup_etat.content | b64decode)
+         | regex_search('^chemin=(.*)$', '\1', multiline=True) | first | trim }}
+    _centreon_central_backup_octets: >-
+      {{ (_centreon_central_backup_etat.content | b64decode)
+         | regex_search('^octets=(.*)$', '\1', multiline=True) | first | trim }}
+
+- name: Vérifier les empreintes des fichiers sauvegardés
+  when: centreon_central_backup_run_now | bool
+  ansible.builtin.command:
+    cmd: sha256sum --check --quiet SHA256SUMS
+    chdir: "{{ _centreon_central_backup_chemin }}"
+  register: _centreon_central_backup_empreintes
+  changed_when: false
+
+- name: Confirmer que la sauvegarde est exploitable
+  when: centreon_central_backup_run_now | bool
+  ansible.builtin.assert:
+    that:
+      - _centreon_central_backup_octets | int > centreon_central_backup_taille_minimale | int
+      - _centreon_central_backup_empreintes.rc == 0
+    fail_msg: >-
+      La sauvegarde de {{ inventory_hostname }} n'est pas exploitable :
+      {{ _centreon_central_backup_octets }} octets produits, contrôle des
+      empreintes en code {{ _centreon_central_backup_empreintes.rc }}.
+    success_msg: >-
+      Sauvegarde vérifiée sur {{ inventory_hostname }} :
+      {{ _centreon_central_backup_chemin }},
+      {{ (_centreon_central_backup_octets | int / 1048576) | round(1) }} Mio,
+      empreintes conformes. Rétention de
+      {{ centreon_central_backup_retention_days }} jours, prochaine exécution
+      selon « {{ centreon_central_backup_schedule }} ».
+    quiet: true
+
+- name: Rappeler ce que cette sauvegarde ne couvre pas
+  ansible.builtin.debug:
+    msg: >-
+      Les sauvegardes restent sur {{ inventory_hostname }}, dans
+      {{ centreon_central_backup_directory }}. Elles protègent d'une erreur
+      logique, d'une migration ratée ou d'une suppression, mais pas de la perte
+      de la machine elle-même. Les recopier hors de cette machine reste à faire,
+      et c'est le seul cas qu'elles ne couvrent pas.
