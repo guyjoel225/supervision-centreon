@@ -307,6 +307,7 @@ décide pas depuis une ligne de commande.
 | Document | Ce qu'il couvre |
 |----------|-----------------|
 | [docs/guide-utilisation.md](docs/guide-utilisation.md) | Quel playbook pour quel besoin, quatre scénarios complets |
+| [docs/procedure-agents-v2c.md](docs/procedure-agents-v2c.md) | Procédure d'intervention pas à pas : raccorder des serveurs en production à un central existant qui interroge en v2c |
 | [docs/ajouter-un-serveur.md](docs/ajouter-un-serveur.md) | Raccorder un serveur en service, sans l'interrompre, y compris à un central existant en v2c |
 | [docs/catalogue-supervision.md](docs/catalogue-supervision.md) | Tout ce que le plugin sait mesurer, la branche SNMP que chaque mode exige, et comment ajouter un contrôle |
 | [docs/montee-de-version.md](docs/montee-de-version.md) | Monter le central de version, et revenir en arrière |
