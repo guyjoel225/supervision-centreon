@@ -2,28 +2,45 @@
 
 ###############################################################################
 # CENTREON SNMP AGENT INSTALLER
-# Version 5.0.1
+# Version 5.1.0
 #
-# Supports:
-#   - Rocky / RHEL / AlmaLinux / CentOS / Fedora
-#   - Ubuntu / Debian
+# Installation/configuration d'un agent SNMP pour Centreon.
+#
+# OS supportés :
+#   - Rocky Linux
+#   - RHEL
+#   - AlmaLinux
+#   - CentOS
+#   - Fedora
+#   - Ubuntu
+#   - Debian
+#
+# Protocoles :
 #   - SNMPv2c
 #   - SNMPv3 authPriv
-#   - UFW / firewalld
 #
-# Safety:
-#   - Real dry-run
-#   - Read-only precheck
-#   - Backup before modification
-#   - Explicit rollback
-#   - Existing configuration preserved
-#   - Only snmpd may be stopped/restarted
-#   - No third-party service manipulation
+# Firewall :
+#   - firewalld
+#   - UFW
+#
+# PRINCIPES DE SECURITE :
+#   - --dry-run = aucune modification
+#   - Backup avant modification
+#   - Conservation de la configuration existante
+#   - Bloc Centreon isolé et idempotent
+#   - Rollback automatique en cas d'échec
+#   - Seul le service snmpd peut être manipulé
+#   - Aucun service tiers arrêté
+#   - Aucun mot de passe écrit dans les logs
 ###############################################################################
 
 set -Eeuo pipefail
 
-VERSION="5.0.1"
+VERSION="5.1.0"
+
+###############################################################################
+# CONFIGURATION GLOBALE
+###############################################################################
 
 SNMP_CONF="/etc/snmp/snmpd.conf"
 SNMP_SERVICE="snmpd"
@@ -36,31 +53,56 @@ LOCK_FILE="/run/centreon-snmp-installer.lock"
 
 DRY_RUN=false
 
+###############################################################################
+# SYSTEME
+###############################################################################
+
 OS_ID=""
 OS_NAME=""
 OS_VERSION=""
 PKG_MANAGER=""
 
+###############################################################################
+# CONFIGURATION CENTREON
+###############################################################################
+
 POLLER_IP=""
 SNMP_VERSION=""
 
 COMMUNITY=""
+
 SNMP_USER=""
 SNMP_AUTH_PROTO=""
 SNMP_AUTH_PASS=""
 SNMP_PRIV_PROTO=""
 SNMP_PRIV_PASS=""
 
+###############################################################################
+# FIREWALL
+###############################################################################
+
 FIREWALL="none"
+FIREWALL_CHANGED=false
+
+###############################################################################
+# ETAT INITIAL
+###############################################################################
 
 SNMP_INITIAL_ACTIVE=false
 SNMP_INITIAL_ENABLED=false
+
+###############################################################################
+# BACKUPS
+###############################################################################
 
 CONFIG_BACKUP=""
 PERSISTENT_BACKUP=""
 PERSISTENT_CONF=""
 
-FIREWALL_CHANGED=false
+###############################################################################
+# ETAT TRANSACTION
+###############################################################################
+
 CONFIG_CHANGED=false
 SNMPV3_CHANGED=false
 
@@ -90,10 +132,12 @@ fatal() {
 }
 
 section() {
+
     echo
     printf '%s\n' "============================================================"
     printf ' %s\n' "$*"
     printf '%s\n' "============================================================"
+
 }
 
 ###############################################################################
@@ -101,11 +145,13 @@ section() {
 ###############################################################################
 
 cleanup() {
+
     rm -f "$LOCK_FILE" 2>/dev/null || true
 
     unset COMMUNITY
     unset SNMP_AUTH_PASS
     unset SNMP_PRIV_PASS
+
 }
 
 trap cleanup EXIT
@@ -115,32 +161,39 @@ trap cleanup EXIT
 ###############################################################################
 
 usage() {
+
     cat <<EOF
 
 Centreon SNMP Agent Installer V$VERSION
 
 Usage:
 
-  sudo $0
-  sudo $0 --dry-run
+    sudo $0
+    sudo $0 --dry-run
 
 Options:
 
-  --dry-run    Read-only analysis + proposed plan
-  --help       Show help
+    --dry-run
+        Analyse le système et affiche le plan.
+        Aucune modification n'est effectuée.
 
-IMPORTANT:
+    --help
+        Affiche cette aide.
 
-  --dry-run performs NO:
-    - package installation
-    - file creation
-    - configuration modification
-    - firewall modification
-    - service stop/start/restart
-    - service enable/disable
-    - SNMPv3 user creation
+Le mode --dry-run ne fait AUCUNE des opérations suivantes :
+
+    - installation de paquet
+    - création de fichier
+    - modification de fichier
+    - création d'utilisateur SNMPv3
+    - modification firewall
+    - arrêt de service
+    - démarrage de service
+    - redémarrage de service
+    - enable/disable systemd
 
 EOF
+
 }
 
 parse_args() {
@@ -150,17 +203,23 @@ parse_args() {
         case "$1" in
 
             --dry-run)
+
                 DRY_RUN=true
                 shift
+
                 ;;
 
             --help|-h)
+
                 usage
                 exit 0
+
                 ;;
 
             *)
+
                 fatal "Option inconnue : $1"
+
                 ;;
 
         esac
@@ -176,7 +235,9 @@ parse_args() {
 check_root() {
 
     if [[ "$EUID" -ne 0 ]]; then
-        fatal "Exécuter avec sudo/root."
+
+        fatal "Ce script doit être exécuté avec sudo/root."
+
     fi
 
 }
@@ -188,16 +249,16 @@ check_root() {
 acquire_lock() {
 
     #
-    # IMPORTANT:
-    # dry-run does not create the lock because it must remain
-    # completely read-only.
+    # Le dry-run doit rester strictement read-only.
     #
     if [[ "$DRY_RUN" == true ]]; then
-        return
+        return 0
     fi
 
     if [[ -e "$LOCK_FILE" ]]; then
+
         fatal "Une autre instance du script est déjà active."
+
     fi
 
     (
@@ -208,13 +269,13 @@ acquire_lock() {
 }
 
 ###############################################################################
-# OS DETECTION
+# DETECTION OS
 ###############################################################################
 
 detect_os() {
 
     [[ -r /etc/os-release ]] ||
-        fatal "/etc/os-release introuvable."
+        fatal "/etc/os-release est introuvable."
 
     # shellcheck disable=SC1091
     source /etc/os-release
@@ -229,8 +290,10 @@ detect_os() {
 
             if command -v dnf >/dev/null 2>&1; then
                 PKG_MANAGER="dnf"
-            else
+            elif command -v yum >/dev/null 2>&1; then
                 PKG_MANAGER="yum"
+            else
+                fatal "dnf/yum introuvable."
             fi
 
             ;;
@@ -255,13 +318,13 @@ detect_os() {
 }
 
 ###############################################################################
-# SERVICE STATE
+# ETAT SERVICE
 ###############################################################################
 
 read_service_state() {
 
     command -v systemctl >/dev/null 2>&1 ||
-        fatal "systemd est requis."
+        fatal "systemctl est requis."
 
     if systemctl is-active --quiet "$SNMP_SERVICE"; then
         SNMP_INITIAL_ACTIVE=true
@@ -272,15 +335,15 @@ read_service_state() {
     fi
 
     if [[ "$SNMP_INITIAL_ACTIVE" == true ]]; then
-        info "snmpd : actif"
+        info "Service snmpd : actif"
     else
-        info "snmpd : arrêté"
+        info "Service snmpd : arrêté"
     fi
 
     if [[ "$SNMP_INITIAL_ENABLED" == true ]]; then
-        info "snmpd au démarrage : activé"
+        info "Démarrage automatique : activé"
     else
-        info "snmpd au démarrage : désactivé"
+        info "Démarrage automatique : désactivé"
     fi
 
 }
@@ -294,23 +357,25 @@ check_net_snmp() {
     if command -v snmpd >/dev/null 2>&1 &&
        command -v snmpget >/dev/null 2>&1; then
 
-        ok "Net-SNMP installé."
+        ok "Net-SNMP est installé."
+
         return 0
 
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
 
-        warn "Net-SNMP incomplet."
+        warn "Net-SNMP n'est pas complètement installé."
+
+        echo
+        echo "[DRY-RUN] Installation prévue :"
 
         if [[ "$PKG_MANAGER" == "apt" ]]; then
 
-            info "[DRY-RUN] Installation prévue :"
             echo "  apt-get install -y snmp snmpd"
 
         else
 
-            info "[DRY-RUN] Installation prévue :"
             echo "  $PKG_MANAGER install -y net-snmp net-snmp-utils"
 
         fi
@@ -319,12 +384,12 @@ check_net_snmp() {
 
     fi
 
-    fatal "Net-SNMP doit être installé avant cette étape."
+    fatal "snmpd/snmpget sont nécessaires."
 
 }
 
 ###############################################################################
-# PERSISTENT SNMP CONFIG
+# CONFIGURATION PERSISTANTE SNMPv3
 ###############################################################################
 
 detect_persistent_config() {
@@ -343,7 +408,7 @@ detect_persistent_config() {
 
             info "Fichier persistant SNMP : $PERSISTENT_CONF"
 
-            return
+            return 0
 
         fi
 
@@ -352,11 +417,15 @@ detect_persistent_config() {
     case "$OS_ID" in
 
         rocky|rhel|almalinux|centos|fedora)
+
             PERSISTENT_CONF="/var/lib/net-snmp/snmpd.conf"
+
             ;;
 
         ubuntu|debian)
+
             PERSISTENT_CONF="/var/lib/snmp/snmpd.conf"
+
             ;;
 
     esac
@@ -366,18 +435,24 @@ detect_persistent_config() {
 }
 
 ###############################################################################
-# FIREWALL DETECTION
+# FIREWALL
 ###############################################################################
 
 detect_firewall() {
 
     FIREWALL="none"
 
+    #
+    # firewalld
+    #
     if command -v firewall-cmd >/dev/null 2>&1 &&
        firewall-cmd --state >/dev/null 2>&1; then
 
         FIREWALL="firewalld"
 
+    #
+    # UFW
+    #
     elif command -v ufw >/dev/null 2>&1 &&
          ufw status 2>/dev/null | grep -q '^Status: active'; then
 
@@ -388,15 +463,21 @@ detect_firewall() {
     case "$FIREWALL" in
 
         firewalld)
+
             info "Firewall actif : firewalld"
+
             ;;
 
         ufw)
+
             info "Firewall actif : UFW"
+
             ;;
 
         none)
+
             warn "Aucun firewall local actif."
+
             ;;
 
     esac
@@ -404,26 +485,33 @@ detect_firewall() {
 }
 
 ###############################################################################
-# IPv4 VALIDATION
+# VALIDATION IPV4
 ###############################################################################
 
 validate_ipv4() {
 
     local ip="$1"
-    local IFS=.
 
-    read -r a b c d <<< "$ip"
+    local a
+    local b
+    local c
+    local d
+
+    IFS=. read -r a b c d <<< "$ip"
 
     [[ "$a" =~ ^[0-9]+$ ]] &&
     [[ "$b" =~ ^[0-9]+$ ]] &&
     [[ "$c" =~ ^[0-9]+$ ]] &&
     [[ "$d" =~ ^[0-9]+$ ]] &&
-    (( a <= 255 && b <= 255 && c <= 255 && d <= 255 ))
+    (( a <= 255 )) &&
+    (( b <= 255 )) &&
+    (( c <= 255 )) &&
+    (( d <= 255 ))
 
 }
 
 ###############################################################################
-# POLLER
+# SAISIE POLLER
 ###############################################################################
 
 ask_poller() {
@@ -433,7 +521,9 @@ ask_poller() {
         read -r -p "IP du Poller Centreon : " POLLER_IP
 
         if validate_ipv4 "$POLLER_IP"; then
+
             break
+
         fi
 
         warn "Adresse IPv4 invalide."
@@ -443,7 +533,7 @@ ask_poller() {
 }
 
 ###############################################################################
-# SNMPv2c
+# SAISIE SNMPv2c
 ###############################################################################
 
 ask_v2c() {
@@ -451,33 +541,38 @@ ask_v2c() {
     while true; do
 
         #
-        # Community intentionally visible.
+        # Community volontairement visible.
         #
         read -r -p "Community SNMPv2c : " COMMUNITY
 
         if [[ -n "$COMMUNITY" ]]; then
+
             break
+
         fi
 
-        warn "Community vide interdite."
+        warn "La community ne peut pas être vide."
 
     done
 
 }
 
 ###############################################################################
-# SNMPv3
+# SAISIE SNMPv3
 ###############################################################################
 
 ask_v3() {
 
     read -r -p "Utilisateur SNMPv3 : " SNMP_USER
 
+    [[ -n "$SNMP_USER" ]] ||
+        fatal "Utilisateur SNMPv3 vide."
+
     [[ "$SNMP_USER" =~ ^[A-Za-z0-9_.-]+$ ]] ||
         fatal "Nom utilisateur SNMPv3 invalide."
 
     echo
-    echo "Authentification :"
+    echo "Algorithme d'authentification :"
     echo "  1) SHA"
     echo "  2) SHA-256"
     echo "  3) SHA-512"
@@ -511,7 +606,7 @@ ask_v3() {
         fatal "Mot de passe auth trop court."
 
     echo
-    echo "Confidentialité :"
+    echo "Algorithme de confidentialité :"
     echo "  1) AES"
 
     read -r -p "Choix [1] : " choice
@@ -530,7 +625,7 @@ ask_v3() {
 }
 
 ###############################################################################
-# CONFIGURATION MENU
+# MENU SNMP
 ###############################################################################
 
 ask_configuration() {
@@ -575,7 +670,7 @@ ask_configuration() {
 }
 
 ###############################################################################
-# MANAGED BLOCK
+# BLOC SNMPv2c
 ###############################################################################
 
 build_v2c_block() {
@@ -584,7 +679,7 @@ build_v2c_block() {
 $MANAGED_BEGIN
 #
 # Managed by Centreon SNMP Installer V$VERSION
-# Poller Centreon: $POLLER_IP
+# Poller Centreon : $POLLER_IP
 #
 
 rocommunity $COMMUNITY $POLLER_IP
@@ -594,13 +689,17 @@ EOF
 
 }
 
+###############################################################################
+# BLOC SNMPv3
+###############################################################################
+
 build_v3_block() {
 
     cat <<EOF
 $MANAGED_BEGIN
 #
 # Managed by Centreon SNMP Installer V$VERSION
-# Poller Centreon: $POLLER_IP
+# Poller Centreon : $POLLER_IP
 #
 
 rouser $SNMP_USER authPriv
@@ -611,7 +710,7 @@ EOF
 }
 
 ###############################################################################
-# REMOVE ONLY OUR BLOCK
+# SUPPRESSION UNIQUEMENT DE NOTRE BLOC
 ###############################################################################
 
 strip_managed_block() {
@@ -639,7 +738,7 @@ strip_managed_block() {
 }
 
 ###############################################################################
-# CANDIDATE CONFIG
+# GENERATION CONFIG CANDIDATE
 ###############################################################################
 
 generate_candidate() {
@@ -647,9 +746,13 @@ generate_candidate() {
     local block
 
     if [[ "$SNMP_VERSION" == "2c" ]]; then
+
         block="$(build_v2c_block)"
+
     else
+
         block="$(build_v3_block)"
+
     fi
 
     {
@@ -660,16 +763,17 @@ generate_candidate() {
 }
 
 ###############################################################################
-# TRUE DRY-RUN
+# DRY RUN
 ###############################################################################
 
 dry_run_plan() {
 
     section "DRY-RUN"
 
+    echo "[DRY-RUN] MODE LECTURE SEULE."
     echo "[DRY-RUN] AUCUNE MODIFICATION NE SERA EFFECTUÉE."
-    echo
 
+    echo
     echo "État actuel :"
 
     echo "  OS              : $OS_NAME $OS_VERSION"
@@ -681,9 +785,9 @@ dry_run_plan() {
     fi
 
     if [[ "$SNMP_INITIAL_ENABLED" == true ]]; then
-        echo "  démarrage boot  : activé"
+        echo "  boot            : activé"
     else
-        echo "  démarrage boot  : désactivé"
+        echo "  boot            : désactivé"
     fi
 
     echo "  firewall        : $FIREWALL"
@@ -702,7 +806,7 @@ dry_run_plan() {
     else
 
         echo "  User            : $SNMP_USER"
-        echo "  Authentication  : $SNMP_AUTH_PROTO"
+        echo "  Auth            : $SNMP_AUTH_PROTO"
         echo "  Privacy         : $SNMP_PRIV_PROTO"
         echo "  Passwords       : ********"
 
@@ -715,7 +819,7 @@ dry_run_plan() {
 
     if [[ "$SNMP_VERSION" == "3" ]]; then
 
-        echo "  [PLAN] Backup du fichier persistant SNMPv3"
+        echo "  [PLAN] Backup de $PERSISTENT_CONF"
         echo "  [PLAN] Création/validation de l'utilisateur SNMPv3"
 
     fi
@@ -726,9 +830,13 @@ dry_run_plan() {
     echo "  [PLAN] Configuration firewall UDP/161 depuis $POLLER_IP"
 
     if [[ "$SNMP_INITIAL_ACTIVE" == true ]]; then
+
         echo "  [PLAN] Redémarrage contrôlé de snmpd"
+
     else
+
         echo "  [PLAN] Démarrage contrôlé de snmpd"
+
     fi
 
     echo
@@ -762,13 +870,18 @@ create_backups() {
     mkdir -p "$BACKUP_ROOT"
 
     local timestamp
+
     timestamp="$(date '+%Y%m%d_%H%M%S')"
 
     CONFIG_BACKUP="$BACKUP_ROOT/snmpd.conf.$timestamp"
 
-    cp -a "$SNMP_CONF" "$CONFIG_BACKUP"
+    if [[ -f "$SNMP_CONF" ]]; then
 
-    ok "Backup : $CONFIG_BACKUP"
+        cp -a "$SNMP_CONF" "$CONFIG_BACKUP"
+
+        ok "Backup snmpd.conf : $CONFIG_BACKUP"
+
+    fi
 
     if [[ "$SNMP_VERSION" == "3" &&
           -f "$PERSISTENT_CONF" ]]; then
@@ -777,17 +890,19 @@ create_backups() {
 
         cp -a "$PERSISTENT_CONF" "$PERSISTENT_BACKUP"
 
-        ok "Backup persistant : $PERSISTENT_BACKUP"
+        ok "Backup persistant SNMPv3 : $PERSISTENT_BACKUP"
 
     fi
 
 }
 
 ###############################################################################
-# CONFIG VALIDATION
+# VALIDATION CANDIDATE
 ###############################################################################
 
-validate_candidate_syntax() {
+validate_candidate() {
+
+    info "Validation de la configuration candidate..."
 
     local candidate
 
@@ -798,7 +913,7 @@ validate_candidate_syntax() {
     generate_candidate > "$candidate"
 
     #
-    # Detect incomplete access directives.
+    # Vérification directives d'accès incomplètes.
     #
     if grep -nE \
         '^[[:space:]]*(rocommunity|rwcommunity|rouser|rwuser)[[:space:]]*$' \
@@ -806,53 +921,52 @@ validate_candidate_syntax() {
 
         rm -f "$candidate"
 
-        fatal "Directive SNMP incomplète."
+        fatal "Directive SNMP incomplète détectée."
 
     fi
 
     #
-    # Verify snmpd command is available.
+    # Vérification minimale de la disponibilité de snmpd.
     #
     command -v snmpd >/dev/null 2>&1 ||
         fatal "snmpd introuvable."
 
     #
-    # -H verifies that snmpd can load its directive database.
+    # Nettoyage.
     #
-    if ! snmpd -H >/dev/null 2>&1; then
-
-        rm -f "$candidate"
-
-        fatal "snmpd ne peut pas charger ses directives."
-
-    fi
-
     rm -f "$candidate"
 
-    ok "Validation structurelle réussie."
+    ok "Configuration candidate validée."
 
 }
 
 ###############################################################################
-# APPLY MAIN CONFIG
+# APPLICATION CONFIG
 ###############################################################################
 
 apply_main_config() {
 
-    local tmp
+    local temporary
 
-    tmp="$(mktemp "${SNMP_CONF}.XXXXXX")"
+    temporary="$(mktemp "${SNMP_CONF}.XXXXXX")"
 
-    chmod 600 "$tmp"
+    chmod 600 "$temporary"
 
-    generate_candidate > "$tmp"
+    generate_candidate > "$temporary"
 
     #
-    # Preserve owner and group.
+    # Conservation owner/group.
     #
-    chown --reference="$SNMP_CONF" "$tmp" 2>/dev/null || true
+    if [[ -f "$SNMP_CONF" ]]; then
 
-    mv "$tmp" "$SNMP_CONF"
+        chown \
+            --reference="$SNMP_CONF" \
+            "$temporary" \
+            2>/dev/null || true
+
+    fi
+
+    mv "$temporary" "$SNMP_CONF"
 
     CONFIG_CHANGED=true
 
@@ -861,31 +975,32 @@ apply_main_config() {
 }
 
 ###############################################################################
-# SNMPv3 USER
+# CREATION SNMPv3
 ###############################################################################
 
 create_v3_user() {
 
-    [[ "$SNMP_VERSION" == "3" ]] || return
+    [[ "$SNMP_VERSION" == "3" ]] || return 0
 
     command -v net-snmp-create-v3-user >/dev/null 2>&1 ||
         fatal "net-snmp-create-v3-user introuvable."
 
     #
-    # Existing user detection.
+    # Vérification utilisateur existant.
     #
     if [[ -f "$PERSISTENT_CONF" ]] &&
-       grep -Eq "(^|[[:space:]])${SNMP_USER}([[:space:]]|$)" \
+       grep -Eq \
+       "(^|[[:space:]])${SNMP_USER}([[:space:]]|$)" \
        "$PERSISTENT_CONF"; then
 
         warn "L'utilisateur SNMPv3 '$SNMP_USER' semble déjà exister."
 
-        return
+        return 0
 
     fi
 
     #
-    # The Net-SNMP utility requires the agent to be stopped.
+    # Le binaire Net-SNMP peut nécessiter que snmpd soit arrêté.
     #
     if systemctl is-active --quiet "$SNMP_SERVICE"; then
 
@@ -895,6 +1010,9 @@ create_v3_user() {
 
     fi
 
+    #
+    # Seul snmpd est arrêté.
+    #
     net-snmp-create-v3-user \
         -ro \
         -a "$SNMP_AUTH_PROTO" \
@@ -913,7 +1031,7 @@ create_v3_user() {
 }
 
 ###############################################################################
-# FIREWALL CHECK
+# FIREWALL - VERIFICATION
 ###############################################################################
 
 firewall_rule_exists() {
@@ -923,13 +1041,16 @@ firewall_rule_exists() {
         ufw)
 
             ufw status 2>/dev/null |
-                grep -Eq "161/udp.*${POLLER_IP}"
+                grep -Eq \
+                "161/udp.*${POLLER_IP}"
 
             ;;
 
         firewalld)
 
-            firewall-cmd --list-rich-rules 2>/dev/null |
+            firewall-cmd \
+                --list-rich-rules \
+                2>/dev/null |
                 grep -Fq \
                 "source address=\"$POLLER_IP\" port port=\"161\" protocol=\"udp\""
 
@@ -946,7 +1067,7 @@ firewall_rule_exists() {
 }
 
 ###############################################################################
-# FIREWALL APPLY
+# FIREWALL - APPLICATION
 ###############################################################################
 
 apply_firewall() {
@@ -957,13 +1078,13 @@ apply_firewall() {
 
             if firewall_rule_exists; then
 
-                ok "Règle UFW déjà présente."
+                ok "Règle UFW UDP/161 déjà présente."
 
-                return
+                return 0
 
             fi
 
-            info "Autorisation UDP/161 depuis $POLLER_IP."
+            info "Ajout règle UFW UDP/161 depuis $POLLER_IP."
 
             ufw allow \
                 from "$POLLER_IP" \
@@ -981,13 +1102,13 @@ apply_firewall() {
 
             if firewall_rule_exists; then
 
-                ok "Règle firewalld déjà présente."
+                ok "Règle firewalld UDP/161 déjà présente."
 
-                return
+                return 0
 
             fi
 
-            info "Autorisation UDP/161 depuis $POLLER_IP."
+            info "Ajout règle firewalld UDP/161 depuis $POLLER_IP."
 
             firewall-cmd \
                 --permanent \
@@ -1020,7 +1141,8 @@ start_or_restart_snmpd() {
     section "SERVICE SNMPD"
 
     #
-    # ONLY snmpd is touched here.
+    # IMPORTANT :
+    # uniquement snmpd.
     #
     if [[ "$SNMP_INITIAL_ACTIVE" == true ]]; then
 
@@ -1044,8 +1166,9 @@ start_or_restart_snmpd() {
 
         journalctl \
             -u "$SNMP_SERVICE" \
-            -n 40 \
-            --no-pager >&2 || true
+            -n 50 \
+            --no-pager \
+            >&2 || true
 
         return 1
 
@@ -1056,24 +1179,65 @@ start_or_restart_snmpd() {
 }
 
 ###############################################################################
-# SERVICE ENABLE
+# VALIDATION SOCKET UDP/161
 ###############################################################################
 
-enable_snmpd_if_required() {
+validate_snmp_socket() {
 
-    #
-    # IMPORTANT:
-    # Do not silently change a pre-existing disabled state.
-    #
-    if [[ "$SNMP_INITIAL_ENABLED" == true ]]; then
+    info "Vérification de l'écoute UDP/161..."
 
-        return
+    if command -v ss >/dev/null 2>&1; then
+
+        if ss -lun | grep -Eq '(^|[[:space:]])[^ ]*:161([[:space:]]|$)'; then
+
+            ok "snmpd écoute sur UDP/161."
+
+            return 0
+
+        fi
+
+    elif command -v netstat >/dev/null 2>&1; then
+
+        if netstat -lun | grep -Eq '(^|[[:space:]])[^ ]*:161([[:space:]]|$)'; then
+
+            ok "snmpd écoute sur UDP/161."
+
+            return 0
+
+        fi
+
+    else
+
+        warn "ss/netstat absent : socket UDP/161 non vérifié."
+
+        return 0
 
     fi
 
-    warn "snmpd était désactivé au démarrage."
+    error "Aucun processus n'écoute sur UDP/161."
+
+    return 1
+
+}
+
+###############################################################################
+# ETAT SERVICE AU BOOT
+###############################################################################
+
+ask_enable_service() {
+
+    #
+    # Si déjà activé, rien à faire.
+    #
+    if [[ "$SNMP_INITIAL_ENABLED" == true ]]; then
+
+        return 0
+
+    fi
 
     echo
+    warn "snmpd était désactivé au démarrage avant l'installation."
+
     read -r -p \
         "Activer snmpd au démarrage du système ? [y/N] : " answer
 
@@ -1089,113 +1253,11 @@ enable_snmpd_if_required() {
 
         *)
 
-            info "État de démarrage conservé : désactivé."
+            info "snmpd reste désactivé au démarrage."
 
             ;;
 
     esac
-
-}
-
-###############################################################################
-# LOCAL SNMPv2c TEST
-###############################################################################
-
-test_v2c_local() {
-
-    info "Test local SNMPv2c..."
-
-    local output
-
-    output="$(
-        snmpget \
-            -v2c \
-            -c "$COMMUNITY" \
-            -t 2 \
-            -r 1 \
-            127.0.0.1 \
-            1.3.6.1.2.1.1.3.0 \
-            2>/dev/null
-    )" || {
-
-        warn "Le test local SNMPv2c a échoué."
-
-        return 1
-
-    }
-
-    [[ -n "$output" ]] || return 1
-
-    ok "Agent SNMPv2c répond localement."
-
-}
-
-###############################################################################
-# LOCAL SNMPv3 TEST
-###############################################################################
-
-test_v3_local() {
-
-    info "Test local SNMPv3..."
-
-    local output
-
-    output="$(
-        snmpget \
-            -v3 \
-            -l authPriv \
-            -u "$SNMP_USER" \
-            -a "$SNMP_AUTH_PROTO" \
-            -A "$SNMP_AUTH_PASS" \
-            -x "$SNMP_PRIV_PROTO" \
-            -X "$SNMP_PRIV_PASS" \
-            -t 2 \
-            -r 1 \
-            127.0.0.1 \
-            1.3.6.1.2.1.1.3.0 \
-            2>/dev/null
-    )" || {
-
-        warn "Le test local SNMPv3 a échoué."
-
-        return 1
-
-    }
-
-    [[ -n "$output" ]] || return 1
-
-    ok "Agent SNMPv3 répond localement."
-
-}
-
-###############################################################################
-# PERSISTENT V3 CHECK
-###############################################################################
-
-validate_v3_persistence() {
-
-    [[ "$SNMP_VERSION" == "3" ]] || return
-
-    info "Vérification de la persistance SNMPv3..."
-
-    if [[ ! -f "$PERSISTENT_CONF" ]]; then
-
-        fatal "Fichier persistant SNMPv3 introuvable : $PERSISTENT_CONF"
-
-    fi
-
-    #
-    # createUser in plaintext should not remain after snmpd startup.
-    #
-    if grep -Eq \
-        '^[[:space:]]*createUser[[:space:]]+' \
-        "$PERSISTENT_CONF"; then
-
-        fatal "Une directive createUser en clair reste dans le fichier persistant."
-
-    fi
-
-    ok "Persistance SNMPv3 vérifiée."
 
 }
 
@@ -1205,7 +1267,11 @@ validate_v3_persistence() {
 
 rollback_firewall() {
 
-    [[ "$FIREWALL_CHANGED" == true ]] || return
+    if [[ "$FIREWALL_CHANGED" != true ]]; then
+        return 0
+    fi
+
+    info "Annulation de la modification firewall."
 
     case "$FIREWALL" in
 
@@ -1227,16 +1293,22 @@ rollback_firewall() {
                 --remove-rich-rule="rule family=\"ipv4\" source address=\"$POLLER_IP\" port port=\"161\" protocol=\"udp\" accept" \
                 >/dev/null 2>&1 || true
 
-            firewall-cmd --reload >/dev/null 2>&1 || true
+            firewall-cmd \
+                --reload \
+                >/dev/null 2>&1 || true
 
             ;;
 
     esac
 
+    FIREWALL_CHANGED=false
+
+    ok "Modification firewall annulée."
+
 }
 
 ###############################################################################
-# ROLLBACK
+# ROLLBACK COMPLET
 ###############################################################################
 
 rollback() {
@@ -1244,138 +1316,270 @@ rollback() {
     section "ROLLBACK AUTOMATIQUE"
 
     #
-    # ONLY snmpd.
+    # Le rollback doit continuer même si une commande échoue.
     #
-    systemctl stop "$SNMP_SERVICE" 2>/dev/null || true
+    set +e
 
-    #
-    # Restore main configuration.
-    #
+    ###########################################################################
+    # STOP UNIQUEMENT SNMPD
+    ###########################################################################
+
+    info "Arrêt de snmpd."
+
+    systemctl stop "$SNMP_SERVICE" \
+        >/dev/null 2>&1
+
+    ###########################################################################
+    # RESTAURATION CONFIGURATION PRINCIPALE
+    ###########################################################################
+
     if [[ -n "$CONFIG_BACKUP" &&
           -f "$CONFIG_BACKUP" ]]; then
 
-        cp -a "$CONFIG_BACKUP" "$SNMP_CONF"
+        info "Restauration de $SNMP_CONF."
 
-        ok "Configuration snmpd restaurée."
+        cp -a \
+            "$CONFIG_BACKUP" \
+            "$SNMP_CONF"
+
+        if [[ $? -eq 0 ]]; then
+
+            ok "Configuration snmpd restaurée."
+
+        else
+
+            error "Échec de restauration de $SNMP_CONF."
+
+        fi
 
     fi
 
-    #
-    # Restore persistent V3 configuration.
-    #
+    ###########################################################################
+    # RESTAURATION SNMPv3
+    ###########################################################################
+
     if [[ "$SNMP_VERSION" == "3" &&
           -n "$PERSISTENT_BACKUP" &&
           -f "$PERSISTENT_BACKUP" ]]; then
 
-        cp -a "$PERSISTENT_BACKUP" "$PERSISTENT_CONF"
+        info "Restauration de $PERSISTENT_CONF."
 
-        ok "Configuration persistante SNMPv3 restaurée."
+        cp -a \
+            "$PERSISTENT_BACKUP" \
+            "$PERSISTENT_CONF"
+
+        if [[ $? -eq 0 ]]; then
+
+            ok "Configuration persistante SNMPv3 restaurée."
+
+        else
+
+            error "Échec de restauration SNMPv3."
+
+        fi
 
     fi
+
+    ###########################################################################
+    # FIREWALL
+    ###########################################################################
 
     rollback_firewall
 
-    #
-    # Restore original service state.
-    #
+    ###########################################################################
+    # RESTAURATION ETAT ACTIF
+    ###########################################################################
+
+    info "Restauration de l'état actif initial de snmpd."
+
     if [[ "$SNMP_INITIAL_ACTIVE" == true ]]; then
 
-        systemctl start "$SNMP_SERVICE" 2>/dev/null || true
+        systemctl start "$SNMP_SERVICE" \
+            >/dev/null 2>&1
+
+        if systemctl is-active --quiet "$SNMP_SERVICE"; then
+
+            ok "snmpd était actif avant l'opération : état restauré."
+
+        else
+
+            error "Impossible de restaurer snmpd à l'état actif."
+
+        fi
 
     else
 
-        systemctl stop "$SNMP_SERVICE" 2>/dev/null || true
+        systemctl stop "$SNMP_SERVICE" \
+            >/dev/null 2>&1
+
+        if ! systemctl is-active --quiet "$SNMP_SERVICE"; then
+
+            ok "snmpd était arrêté avant l'opération : état restauré."
+
+        else
+
+            error "snmpd est toujours actif."
+
+        fi
 
     fi
+
+    ###########################################################################
+    # RESTAURATION ETAT ENABLE
+    ###########################################################################
+
+    info "Restauration de l'état enable initial."
 
     if [[ "$SNMP_INITIAL_ENABLED" == true ]]; then
 
         systemctl enable "$SNMP_SERVICE" \
-            >/dev/null 2>&1 || true
+            >/dev/null 2>&1
+
+        if systemctl is-enabled --quiet "$SNMP_SERVICE"; then
+
+            ok "snmpd enable restauré : activé."
+
+        else
+
+            error "Impossible de restaurer l'état enable."
+
+        fi
 
     else
 
         systemctl disable "$SNMP_SERVICE" \
-            >/dev/null 2>&1 || true
+            >/dev/null 2>&1
+
+        if ! systemctl is-enabled --quiet "$SNMP_SERVICE" 2>/dev/null; then
+
+            ok "snmpd enable restauré : désactivé."
+
+        else
+
+            error "snmpd est toujours enabled."
+
+        fi
 
     fi
 
-    ok "État initial de snmpd restauré."
+    set -e
+
+    echo
+    separator
 
 }
 
 ###############################################################################
-# REAL INSTALLATION
+# VALIDATION SNMPv3 PERSISTANCE
 ###############################################################################
 
-apply() {
+validate_v3_persistence() {
+
+    [[ "$SNMP_VERSION" == "3" ]] || return 0
+
+    info "Vérification de la configuration persistante SNMPv3."
+
+    if [[ ! -f "$PERSISTENT_CONF" ]]; then
+
+        fatal \
+            "Fichier persistant SNMPv3 introuvable : $PERSISTENT_CONF"
+
+    fi
+
+    #
+    # Après démarrage de snmpd, createUser ne doit pas rester
+    # comme directive plaintext normale dans le fichier persistant.
+    #
+    if grep -Eq \
+        '^[[:space:]]*createUser[[:space:]]+' \
+        "$PERSISTENT_CONF"; then
+
+        fatal \
+            "Une directive createUser en clair reste dans le fichier persistant."
+
+    fi
+
+    ok "Persistance SNMPv3 vérifiée."
+
+}
+
+###############################################################################
+# INSTALLATION
+###############################################################################
+
+apply_installation() {
 
     section "APPLICATION"
 
+    ###########################################################################
+    # 1 - BACKUP
+    ###########################################################################
+
     create_backups
 
-    #
-    # SNMPv3 user creation happens before main config modification.
-    #
+    ###########################################################################
+    # 2 - SNMPv3 USER
+    ###########################################################################
+
     if [[ "$SNMP_VERSION" == "3" ]]; then
 
         create_v3_user
 
     fi
 
-    #
-    # Validate candidate before changing main config.
-    #
-    validate_candidate_syntax
+    ###########################################################################
+    # 3 - VALIDATION CANDIDATE
+    ###########################################################################
 
-    #
-    # Apply only managed block.
-    #
+    validate_candidate
+
+    ###########################################################################
+    # 4 - CONFIGURATION
+    ###########################################################################
+
     apply_main_config
 
-    #
-    # Firewall after configuration preparation.
-    #
+    ###########################################################################
+    # 5 - FIREWALL
+    ###########################################################################
+
     apply_firewall
 
-    #
-    # Start/restart only snmpd.
-    #
+    ###########################################################################
+    # 6 - SERVICE
+    ###########################################################################
+
     if ! start_or_restart_snmpd; then
 
         rollback
 
-        fatal "Échec du démarrage de snmpd."
+        fatal "Impossible de démarrer snmpd."
 
     fi
 
-    #
-    # Optional persistent enable.
-    #
-    enable_snmpd_if_required
+    ###########################################################################
+    # 7 - SOCKET
+    ###########################################################################
 
-    #
-    # Functional test.
-    #
-    if [[ "$SNMP_VERSION" == "2c" ]]; then
+    if ! validate_snmp_socket; then
 
-        if ! test_v2c_local; then
+        rollback
 
-            rollback
+        fatal "snmpd est actif mais UDP/161 n'est pas disponible."
 
-            fatal "Échec du test SNMPv2c."
+    fi
 
-        fi
+    ###########################################################################
+    # 8 - ENABLE
+    ###########################################################################
 
-    else
+    ask_enable_service
 
-        if ! test_v3_local; then
+    ###########################################################################
+    # 9 - SNMPv3 PERSISTENCE
+    ###########################################################################
 
-            rollback
-
-            fatal "Échec du test SNMPv3."
-
-        fi
+    if [[ "$SNMP_VERSION" == "3" ]]; then
 
         validate_v3_persistence
 
@@ -1384,32 +1588,41 @@ apply() {
 
     fi
 
+    ###########################################################################
+    # 10 - SUCCESS
+    ###########################################################################
+
     section "INSTALLATION TERMINÉE"
 
     ok "Agent SNMP configuré."
 
     echo
     echo "Résumé :"
-    echo "  Version SNMP : $SNMP_VERSION"
-    echo "  Poller       : $POLLER_IP"
-    echo "  Service      : $SNMP_SERVICE"
-    echo "  Configuration: $SNMP_CONF"
-    echo "  Firewall     : $FIREWALL"
+    echo
+    echo "  OS              : $OS_NAME $OS_VERSION"
+    echo "  SNMP            : $SNMP_VERSION"
+    echo "  Poller Centreon : $POLLER_IP"
+    echo "  Service         : $SNMP_SERVICE"
+    echo "  Configuration   : $SNMP_CONF"
+    echo "  Firewall        : $FIREWALL"
 
     echo
 
     if [[ "$SNMP_VERSION" == "2c" ]]; then
 
-        echo "Test depuis le Poller Centreon :"
+        echo "Test à effectuer depuis le Poller Centreon :"
         echo
         echo "  snmpget -v2c -c '<COMMUNITY>' \\"
-        echo "    <IP_SERVEUR> 1.3.6.1.2.1.1.3.0"
+        echo "    <IP_SERVEUR> \\"
+        echo "    1.3.6.1.2.1.1.3.0"
 
     else
 
-        echo "Test SNMPv3 depuis le Poller avec les identifiants configurés."
+        echo "Test SNMPv3 à effectuer depuis le Poller Centreon."
 
     fi
+
+    echo
 
 }
 
@@ -1433,19 +1646,25 @@ main() {
     fi
 
     check_root
+
     acquire_lock
 
     detect_os
+
     read_service_state
+
     check_net_snmp
+
     detect_persistent_config
+
     detect_firewall
 
     ask_configuration
 
-    #
-    # HARD DRY-RUN BOUNDARY.
-    #
+    ###########################################################################
+    # HARD DRY-RUN BOUNDARY
+    ###########################################################################
+
     if [[ "$DRY_RUN" == true ]]; then
 
         dry_run_plan
@@ -1454,7 +1673,11 @@ main() {
 
     fi
 
-    apply
+    ###########################################################################
+    # REAL INSTALLATION
+    ###########################################################################
+
+    apply_installation
 
 }
 
