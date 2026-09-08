@@ -286,6 +286,27 @@ existant : il montre les directives en place sans jamais afficher une
 communauté ni une phrase secrète, et dit si la machine envoie ses alertes
 ailleurs ou expose un accès en écriture.
 
+## Installer un agent sans Ansible
+
+Quand il faut confier l'installation à l'équipe qui exploite un serveur, sans
+contrôleur ni inventaire, un script autonome fait le même travail que le rôle :
+
+```bash
+sudo ./scripts/installer-agent-snmp.sh --version v3 --central <adresse>
+```
+
+Sans `--appliquer`, il ne modifie rien : il établit et affiche ce qu'il ferait,
+état de la machine compris. Le protocole se choisit entre `v3`, authentifié et
+chiffré, et `v2c` pour les centraux qui ne savent pas faire autrement.
+
+Les secrets ne se passent jamais en argument, où `ps` les exposerait : ils sont
+demandés sans être affichés, ou lus dans un fichier avec `--secrets`.
+
+Sur un serveur en production, le script s'interdit de toucher à autre chose
+qu'à l'agent, de redémarrer un service qui n'est pas `snmpd`, d'activer un
+pare-feu qui ne l'était pas, et d'écraser une configuration SNMP existante sans
+`--forcer`.
+
 ## Retirer un serveur de la supervision
 
 ```bash

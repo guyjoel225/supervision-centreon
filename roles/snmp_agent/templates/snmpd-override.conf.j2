@@ -1,0 +1,28 @@
+{{ ansible_managed | comment }}
+#
+# Rend le démarrage de l'agent résilient aux interfaces montées tardivement.
+#
+# L'agent lie son écoute à une adresse précise, ce qui restreint sa surface et
+# doit le rester. Mais cette adresse peut appartenir à une interface qui
+# n'existe pas encore au moment où systemd lance le service : réseau virtuel,
+# liaison agrégée, interface portée par un service applicatif. net-snmp
+# échoue alors sur « Error opening specified endpoint » et s'arrête
+# définitivement, sans jamais réessayer.
+#
+# Le cas s'est produit le 06/09/2026 sur une machine dont l'adresse d'écoute
+# appartenait à une interface VMware : l'agent est resté à l'arrêt seize
+# heures, et la supervision de cette machine avec lui, sans que rien ne le
+# signale.
+
+[Unit]
+After=network-online.target
+Wants=network-online.target
+# Cinq tentatives en cinq minutes, puis abandon. Sans cette limite, une
+# configuration réellement invalide ferait boucler le service indéfiniment,
+# ce qui masquerait la cause au lieu de la révéler.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Restart=on-failure
+RestartSec=10
