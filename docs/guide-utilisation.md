@@ -411,7 +411,7 @@ ou la version SNMP déclarée ne correspond pas à celle activée sur l'agent.
 ## 8. Vérifier
 
 ```bash
-make verify-agents    # les agents, interrogés par le contrôleur Ansible
+make verify-agents    # les agents : par le contrôleur en v3, par la boucle locale en v2c
 make verify           # la chaîne complète, exige un central en service
 ```
 

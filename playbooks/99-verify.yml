@@ -74,13 +74,18 @@
 
     # Les phrases secrètes ne passent jamais par une ligne de commande, où ps
     # les rendrait lisibles par tout utilisateur de la machine.
-    - name: Déposer les paramètres de test SNMP v3
+    # Les paramètres suivent la version réellement active sur les agents.
+    # Écrire « v3 » en dur ferait échouer la vérification sur un parc en v2c,
+    # et le rapport accuserait alors un agent muet là où seule la version
+    # employée par la sonde était fausse.
+    - name: Déposer les paramètres de test SNMP
       ansible.builtin.copy:
         dest: "{{ _verify_probe_dir.path }}/snmp.conf"
         owner: root
         group: root
         mode: "0600"
         content: |
+          {% if snmp_agent_enable_v3 | default(true) %}
           defVersion 3
           defSecurityLevel authPriv
           defSecurityName {{ snmp_agent_v3_user }}
@@ -88,10 +93,14 @@
           defAuthPassphrase {{ snmp_agent_v3_auth_passphrase }}
           defPrivType {{ snmp_agent_v3_priv_protocol }}
           defPrivPassphrase {{ snmp_agent_v3_priv_passphrase }}
+          {% else %}
+          defVersion 2c
+          defCommunity {{ snmp_agent_v2c_community }}
+          {% endif %}
       no_log: true
       changed_when: false
 
-    - name: Interroger l'agent avec l'utilisateur SNMP v3
+    - name: Interroger l'agent dans la version qu'il sert
       ansible.builtin.command:
         cmd: snmpget -Oqv 127.0.0.1:{{ snmp_agent_port }} .1.3.6.1.2.1.1.5.0
       environment:
@@ -106,16 +115,21 @@
         state: absent
       changed_when: false
 
-    - name: Exiger que l'utilisateur SNMP v3 réponde
+    - name: Exiger que l'agent réponde dans la version qu'il sert
+      vars:
+        _verify_identite: >-
+          {{ ("l'utilisateur SNMP v3 " ~ snmp_agent_v3_user)
+             if snmp_agent_enable_v3 | default(true)
+             else 'la communauté SNMP v2c' }}
       ansible.builtin.assert:
         that:
           - _verify_user.rc == 0
           - _verify_user.stdout | trim | length > 0
         fail_msg: >-
-          L'utilisateur SNMP v3 {{ snmp_agent_v3_user }} ne répond pas sur
+          {{ _verify_identite }} ne répond pas sur
           {{ inventory_hostname }} : {{ _verify_user.stderr | default(_verify_user.stdout) | trim | default('aucune réponse', true) }}
         success_msg: >-
-          L'utilisateur SNMP v3 répond sur {{ inventory_hostname }},
+          {{ _verify_identite }} répond sur {{ inventory_hostname }},
           nom système « {{ _verify_user.stdout | trim }} »
         quiet: true
 
@@ -155,13 +169,14 @@
       register: _verify_snmpdir
       changed_when: false
 
-    - name: Déposer les paramètres SNMP v3 de vérification
+    - name: Déposer les paramètres SNMP de vérification
       ansible.builtin.copy:
         dest: "{{ _verify_snmpdir.path }}/snmp.conf"
         owner: root
         group: root
         mode: "0600"
         content: |
+          {% if snmp_agent_enable_v3 | default(true) %}
           defVersion 3
           defSecurityLevel authPriv
           defSecurityName {{ snmp_agent_v3_user }}
@@ -169,6 +184,10 @@
           defAuthPassphrase {{ snmp_agent_v3_auth_passphrase }}
           defPrivType {{ snmp_agent_v3_priv_protocol }}
           defPrivPassphrase {{ snmp_agent_v3_priv_passphrase }}
+          {% else %}
+          defVersion 2c
+          defCommunity {{ snmp_agent_v2c_community }}
+          {% endif %}
       no_log: true
       changed_when: false
 
@@ -189,12 +208,17 @@
           --plugin=os::linux::snmp::plugin
           --mode=load
           --hostname={{ hostvars[item].ansible_host }}
+          {% if snmp_agent_enable_v3 | default(true) %}
           --snmp-version=3
           --snmp-username={{ snmp_agent_v3_user }}
           --authprotocol={{ snmp_agent_v3_auth_protocol }}
           --authpassphrase={{ snmp_agent_v3_auth_passphrase }}
           --privprotocol={{ snmp_agent_v3_priv_protocol }}
           --privpassphrase={{ snmp_agent_v3_priv_passphrase }}
+          {% else %}
+          --snmp-version=2c
+          --snmp-community={{ snmp_agent_v2c_community }}
+          {% endif %}
       loop: "{{ groups['monitored'] | sort }}"
       register: _verify_plugin
       changed_when: false
@@ -217,16 +241,22 @@
       loop_control:
         label: "{{ item.item }}"
 
-    - name: Exiger que tous les hôtes répondent en SNMP v3
+    - name: Exiger que tous les hôtes répondent depuis le central
+      vars:
+        _verify_version: >-
+          {{ 'SNMP v3 authentifié et chiffré'
+             if snmp_agent_enable_v3 | default(true)
+             else 'SNMP v2c, communauté en clair' }}
       ansible.builtin.assert:
         that:
           - _verify_snmpget.results | selectattr('rc', 'ne', 0) | list | length == 0
         fail_msg: >-
-          Hôtes injoignables en SNMP v3 depuis le central :
+          Hôtes injoignables en {{ _verify_version }} depuis le central :
           {{ _verify_snmpget.results | selectattr('rc', 'ne', 0)
              | map(attribute='item') | join(', ') }}
         success_msg: >-
-          Les {{ groups['monitored'] | length }} hôtes supervisés répondent en SNMP v3.
+          Les {{ groups['monitored'] | length }} hôtes supervisés répondent en
+          {{ _verify_version }}.
         quiet: true
 
     - name: Exiger que le plugin Centreon collecte réellement des métriques

@@ -197,11 +197,25 @@ make deploy LIMIT=monitored     # prérequis système et agents SNMP
 make verify-agents              # le contrôleur interroge les agents à la place du central
 ```
 
-`98-verify-snmp-agents.yml` fait jouer au contrôleur Ansible le rôle
-d'interrogateur. Il prouve que l'utilisateur SNMP v3 est créé, que l'agent
-répond en authentifié et chiffré, et que sa vue couvre bien les compteurs que
-consommeront les plugins Linux de Centreon. Il ne remplace pas `99-verify.yml`,
-qui reste la vérification de référence une fois le central en service.
+`98-verify-snmp-agents.yml` prouve que l'agent répond et que sa vue couvre les
+compteurs que consommeront les plugins Linux de Centreon. Le chemin qu'il
+emprunte dépend de la version, parce que les deux ne se contrôlent pas de la
+même façon :
+
+- **en v3**, `rouser` ne dépend d'aucune adresse source : le contrôleur Ansible
+  joue le rôle d'interrogateur, à la place du central, moyennant une ouverture
+  de pare-feu qu'il referme ensuite ;
+- **en v2c**, `rocommunity` n'accepte la communauté que depuis les adresses
+  inscrites dans `snmpd.conf`. Ouvrir le pare-feu au contrôleur ne suffirait
+  pas : il faudrait réécrire la configuration de l'agent et le redémarrer, sur
+  des machines en service, pour la durée d'un contrôle. La preuve est donc
+  faite depuis la machine elle-même, par la boucle locale, sans toucher ni au
+  pare-feu ni à la configuration.
+
+Dans les deux cas il ne remplace pas `99-verify.yml`, qui reste la vérification
+de référence une fois le central en service, et aucun des deux ne prouve le
+chemin réel entre le central et les agents : seule une requête lancée depuis le
+central le fait.
 
 ---
 

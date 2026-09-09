@@ -1,11 +1,30 @@
+{#
+  La ligne « Agent SNMP v3 en lecture seule pour la supervision Centreon. »
+  ci-dessous est la marque de reconnaissance du rôle : preserve_existing.yml
+  la cherche à l'identique pour distinguer un fichier qu'il a écrit d'une
+  configuration posée par un tiers. Ne pas la reformuler, même quand la v2c
+  est active : la changer ferait passer tout le parc déjà configuré pour
+  étranger, et le rôle refuserait alors de le mettre à jour.
+
+  Le reste de l'en-tête est conditionné plutôt que réécrit, pour que le
+  fichier rendu en v3 reste identique à l'octet près : le moindre écart
+  déclencherait un redémarrage de l'agent sur tout le parc au prochain
+  passage, pour un commentaire.
+-#}
 # {{ ansible_managed }}
 #
 # Agent SNMP v3 en lecture seule pour la supervision Centreon.
 # Ce fichier est généré : toute modification manuelle sera écrasée.
 #
 # Choix de conception :
+{% if snmp_agent_enable_v2c | bool %}
+#   - une communauté v1/v2c est déclarée, faute d'un serveur central sachant
+#     interroger en v3 ; elle transporte le secret en clair et n'est acceptée
+#     que depuis les adresses listées plus bas
+{% else %}
 #   - aucune communauté v1/v2c n'est déclarée, ces versions transportent
 #     le secret en clair sur le réseau
+{% endif %}
 #   - l'agent n'écoute que sur les adresses listées ci-dessous
 #   - l'utilisateur ne voit qu'une vue restreinte, pas l'arbre entier
 
@@ -44,6 +63,17 @@ rouser {{ snmp_agent_v3_user }} {{ snmp_agent_v3_security_level }} -V {{ snmp_ag
 {% for manager in snmp_agent_v2c_allowed_managers %}
 rocommunity {{ snmp_agent_v2c_community }} {{ manager }} -V {{ snmp_agent_view_name }}
 {% endfor %}
+{% if snmp_agent_listen_loopback | bool %}
+
+# La boucle locale est autorisée pour que la collecte puisse être prouvée
+# depuis la machine elle-même. Sans cette ligne, la seule façon de vérifier
+# un agent en v2c serait d'ouvrir la communauté à une troisième adresse le
+# temps du contrôle, alors qu'en v3 « rouser » ne dépend d'aucune source.
+# Elle n'élargit pas l'exposition réseau : l'agent n'écoute la boucle locale
+# que si snmp_agent_listen_loopback est vrai, et la communauté reste dans un
+# fichier lisible du seul compte root.
+rocommunity {{ snmp_agent_v2c_community }} 127.0.0.1 -V {{ snmp_agent_view_name }}
+{% endif %}
 {% endif %}
 
 ###############################################################################

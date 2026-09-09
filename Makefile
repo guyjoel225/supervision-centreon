@@ -48,7 +48,7 @@ help:
 	@echo "upgrade  Monter le central de version : constate et sauvegarde"
 	@echo "retirer-agent  Retirer l'agent SNMP d'un hôte : LIMIT et confirmation exigés"
 	@echo "verify   Vérifier la chaîne de bout en bout, sans rien modifier"
-	@echo "verify-agents  Vérifier les agents SNMP depuis le contrôleur, sans central"
+	@echo "verify-agents  Vérifier les agents SNMP sans central : par le contrôleur en v3, par la boucle locale en v2c"
 	@echo ""
 	@echo "diag-base        Base de données : comptes, tables, accès"
 	@echo "diag-installeur  Assistant d'installation web : étape et état"

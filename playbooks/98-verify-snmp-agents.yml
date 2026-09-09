@@ -5,11 +5,26 @@
 # Ce playbook existe pour une raison précise : le central Centreon exige
 # un système d'exploitation qui n'est pas toujours disponible tout de
 # suite. Rien ne justifie pour autant d'attendre avant de prouver que la
-# collecte fonctionne. C'est donc le contrôleur Ansible qui joue ici le
-# rôle d'interrogateur, à la place du central.
+# collecte fonctionne.
 #
-# Il ne configure rien et ne remplace pas 99-verify.yml, qui reste la
-# vérification de référence une fois le central en service.
+# Le chemin suivi dépend de la version éprouvée, et ce n'est pas un détail
+# de forme :
+#
+#   - en v3, « rouser » ne dépend d'aucune adresse source. Le contrôleur
+#     Ansible peut donc jouer le rôle d'interrogateur, à la place du
+#     central, moyennant une ouverture de pare-feu qu'il referme ensuite.
+#
+#   - en v2c, « rocommunity » n'accepte la communauté que depuis les
+#     adresses inscrites dans snmpd.conf. Autoriser le contrôleur
+#     supposerait de réécrire la configuration de l'agent et de le
+#     redémarrer, sur des machines en service, pour la durée d'un
+#     contrôle. La preuve est donc faite depuis la machine elle-même, par
+#     la boucle locale, sans toucher ni au pare-feu ni à la configuration.
+#
+# Dans les deux cas, ce playbook ne prouve pas le chemin réel entre le
+# central et les agents : seule une requête lancée depuis le central le
+# fait. Il ne remplace donc pas 99-verify.yml, qui reste la vérification
+# de référence une fois le central en service.
 #
 # Usage : ansible-playbook playbooks/98-verify-snmp-agents.yml
 # ===================================================================
@@ -24,6 +39,14 @@
   gather_facts: true
   tags: [verify_snmp_local]
   tasks:
+
+    # La version éprouvée est la même pour tout l'inventaire : terminer le
+    # play pour tous les hôtes à la fois est donc correct ici. En v2c, la
+    # preuve se fait par la boucle locale, plus bas, et ce play n'a rien à
+    # ouvrir.
+    - name: Terminer ce play quand la preuve se fera depuis la machine elle-même
+      when: not (snmp_agent_enable_v3 | default(true))
+      ansible.builtin.meta: end_play
 
     # La liste de référence est mémorisée AVANT d'être augmentée. Sans cela,
     # le play de fermeture comparerait à une liste qui contient déjà le
@@ -48,7 +71,7 @@
         tasks_from: firewall.yml
       when: snmp_agent_manage_firewall | bool
 
-- name: Interroger les agents depuis le contrôleur Ansible
+- name: Interroger les agents en v3 depuis le contrôleur Ansible
   hosts: ansible_controller
   # Ce playbook ne modifie rien : il relève et compare. Il doit donc
   # s'exécuter même sous --check, sans quoi chaque relevé reviendrait vide et
@@ -58,6 +81,10 @@
   gather_facts: true
   tags: [verify_snmp_local]
   tasks:
+
+    - name: Terminer ce play quand la version éprouvée n'est pas la v3
+      when: not (snmp_agent_enable_v3 | default(true))
+      ansible.builtin.meta: end_play
 
     # Une vérification prouve une collecte réelle : elle n'a aucun sens en
     # simulation, où aucun paquet n'est posé et où tempfile ne crée rien.
@@ -88,17 +115,15 @@
       register: _probe_dir
       changed_when: false
 
-    # Les paramètres correspondent à la version réellement activée sur les
-    # agents. Quand les deux coexistent, la v3 est éprouvée en priorité :
-    # c'est elle qui doit fonctionner à terme.
-    - name: Déposer les paramètres SNMP de vérification
+    # Ce play ne s'exécute qu'en v3 : quand les deux versions coexistent,
+    # c'est elle qui est éprouvée, puisque c'est elle qui doit rester.
+    - name: Déposer les paramètres SNMP v3 de vérification
       ansible.builtin.copy:
         dest: "{{ _probe_dir.path }}/snmp.conf"
         owner: root
         group: root
         mode: "0600"
         content: |
-          {% if snmp_agent_enable_v3 | default(true) %}
           defVersion 3
           defSecurityLevel authPriv
           defSecurityName {{ snmp_agent_v3_user }}
@@ -106,19 +131,8 @@
           defAuthPassphrase {{ snmp_agent_v3_auth_passphrase }}
           defPrivType {{ snmp_agent_v3_priv_protocol }}
           defPrivPassphrase {{ snmp_agent_v3_priv_passphrase }}
-          {% else %}
-          defVersion 2c
-          defCommunity {{ snmp_agent_v2c_community }}
-          {% endif %}
       no_log: true
       changed_when: false
-
-    - name: Rappeler quelle version est éprouvée
-      ansible.builtin.debug:
-        msg: >-
-          Vérification menée en SNMP
-          {{ 'v3 authentifié et chiffré' if snmp_agent_enable_v3 | default(true)
-             else 'v2c, communauté en clair' }}.
 
     - name: Relever le nom système de chaque hôte supervisé
       ansible.builtin.command:
@@ -186,6 +200,144 @@
           La vue SNMP expose bien les compteurs consommés par les plugins Linux.
         quiet: true
 
+- name: Prouver la collecte en v2c depuis chaque machine supervisée
+  hosts: monitored
+  # Ce playbook ne modifie rien : il relève et compare. Il doit donc
+  # s'exécuter même sous --check, sans quoi chaque relevé reviendrait vide et
+  # chaque vérification échouerait en désignant un agent muet alors que la
+  # cause est le mode d'exécution.
+  check_mode: false
+  gather_facts: true
+  tags: [verify_snmp_local]
+  tasks:
+
+    - name: Terminer ce play quand la version éprouvée n'est pas la v2c
+      when: snmp_agent_enable_v3 | default(true)
+      ansible.builtin.meta: end_play
+
+    # Une vérification prouve une collecte réelle : elle n'a aucun sens en
+    # simulation, où aucun paquet n'est posé et où tempfile ne crée rien.
+    - name: Expliquer pourquoi la vérification ne tourne pas en simulation
+      when: ansible_check_mode
+      ansible.builtin.debug:
+        msg: >-
+          Vérification ignorée : le mode simulation ne peut pas prouver une
+          collecte SNMP réelle. Relancer sans --check pour l'obtenir.
+
+    - name: Terminer le play en simulation
+      when: ansible_check_mode
+      ansible.builtin.meta: end_play
+
+    # La communauté ne passe jamais par une ligne de commande, où ps la
+    # rendrait lisible par tout utilisateur de la machine. Elle transite par
+    # un fichier temporaire, lisible du seul compte root, effacé ensuite.
+    - name: Créer un répertoire de configuration SNMP temporaire
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: snmpcheck
+      register: _probe_local_dir
+      changed_when: false
+
+    - name: Déposer la communauté de vérification
+      ansible.builtin.copy:
+        dest: "{{ _probe_local_dir.path }}/snmp.conf"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          defVersion 2c
+          defCommunity {{ snmp_agent_v2c_community }}
+      no_log: true
+      changed_when: false
+
+    - name: Rappeler ce que cette vérification établit
+      run_once: true
+      ansible.builtin.debug:
+        msg: >-
+          Vérification menée en SNMP v2c, communauté en clair, depuis la
+          boucle locale de chaque machine. Elle établit que l'agent répond et
+          que sa vue est complète. Elle n'établit rien sur le chemin entre le
+          central et ces machines : seule une requête lancée depuis le central
+          le fait.
+
+    - name: Relever le nom système par la boucle locale
+      ansible.builtin.command:
+        cmd: snmpget -Oqv 127.0.0.1:{{ snmp_agent_port }} .1.3.6.1.2.1.1.5.0
+      environment:
+        SNMPCONFPATH: "{{ _probe_local_dir.path }}"
+      register: _probe_local_name
+      changed_when: false
+      failed_when: false
+
+    # Cette branche est celle que consomment les plugins Linux de Centreon.
+    # Si elle répond, la vue SNMP est correctement dimensionnée.
+    - name: Relever la charge système par la boucle locale
+      ansible.builtin.command:
+        cmd: snmpget -Oqv 127.0.0.1:{{ snmp_agent_port }} .1.3.6.1.4.1.2021.10.1.3.1
+      environment:
+        SNMPCONFPATH: "{{ _probe_local_dir.path }}"
+      register: _probe_local_load
+      changed_when: false
+      failed_when: false
+
+    - name: Effacer les paramètres SNMP temporaires
+      ansible.builtin.file:
+        path: "{{ _probe_local_dir.path }}"
+        state: absent
+      changed_when: false
+
+    - name: Présenter la collecte obtenue
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} :
+          {{ 'nom=' ~ (_probe_local_name.stdout | trim)
+             ~ ' charge=' ~ (_probe_local_load.stdout | trim)
+             if _probe_local_name.rc == 0
+             else 'MUET -> ' ~ (_probe_local_name.stderr
+                                | default(_probe_local_name.stdout) | trim) }}
+
+    - name: Exiger que l'agent réponde en v2c sur la boucle locale
+      ansible.builtin.assert:
+        that:
+          - _probe_local_name.rc == 0
+          - _probe_local_name.stdout | trim | length > 0
+        fail_msg: >-
+          L'agent de {{ inventory_hostname }} ne répond pas en v2c sur sa
+          propre boucle locale.
+          Deux causes possibles, dans cet ordre : la configuration a été posée
+          par une version du rôle antérieure à l'autorisation de la boucle
+          locale, auquel cas il suffit de rejouer make snmp-v2c sur cet hôte ;
+          ou snmp_agent_listen_loopback est à false, auquel cas l'agent
+          n'écoute pas 127.0.0.1 et cette vérification ne peut pas
+          l'atteindre.
+        success_msg: >-
+          L'agent de {{ inventory_hostname }} répond en v2c, nom système
+          « {{ _probe_local_name.stdout | trim }} ».
+        quiet: true
+
+    - name: Exiger que la vue SNMP couvre les compteurs attendus par Centreon
+      ansible.builtin.assert:
+        that:
+          - _probe_local_load.rc == 0
+        fail_msg: >-
+          La branche UCD-SNMP ne répond pas sur {{ inventory_hostname }}.
+          L'agent est joignable mais sa vue est trop étroite pour les plugins
+          Linux de Centreon.
+        success_msg: >-
+          La vue SNMP de {{ inventory_hostname }} expose les compteurs
+          consommés par les plugins Linux.
+        quiet: true
+
+    - name: Rappeler la seule preuve qui vaille pour le central
+      run_once: true
+      ansible.builtin.debug:
+        msg: >-
+          Reste à faire lancer depuis le serveur central, pour chaque hôte :
+          snmpget -v2c -c <communaute> -t 3 -r 0 <adresse> 1.3.6.1.2.1.1.5.0
+          Un dépassement de délai désigne alors un filtrage entre les deux
+          réseaux, ou une adresse de central absente des gestionnaires
+          autorisés.
+
 - name: Refermer l'ouverture temporaire accordée au contrôleur
   hosts: monitored
   # Ce playbook ne modifie rien : il relève et compare. Il doit donc
@@ -196,6 +348,10 @@
   gather_facts: true
   tags: [verify_snmp_local]
   tasks:
+
+    - name: Terminer ce play quand aucune ouverture n'a été accordée
+      when: not (snmp_agent_enable_v3 | default(true))
+      ansible.builtin.meta: end_play
 
     # Ce que ce playbook ouvre, il le referme. Le rôle purge désormais les
     # autorisations obsolètes, mais il ne sera pas forcément rejoué : la

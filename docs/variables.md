@@ -90,7 +90,7 @@ Ces deux dernières se surchargent par machine, directement dans `hosts.yml`.
 | `snmp_agent_v3_force_recreate_user` | `false` | Recréer l'utilisateur, pour une rotation |
 | `snmp_agent_port` | `161` | Port d'écoute |
 | `snmp_agent_listen_address` | IPv4 par défaut | Adresse de service |
-| `snmp_agent_listen_loopback` | `true` | Écouter aussi sur `127.0.0.1` |
+| `snmp_agent_listen_loopback` | `true` | Écouter aussi sur `127.0.0.1`. En v2c, la communauté y est également acceptée : c'est ce qui permet de prouver la collecte depuis la machine elle-même, sans ouvrir l'agent à une adresse de plus le temps d'un contrôle |
 | `snmp_agent_allowed_managers` | `[]` | Adresses autorisées à interroger |
 | `snmp_agent_view_name` | `centreonview` | Nom de la vue de lecture |
 | `snmp_agent_view_oids` | 7 branches | Périmètre exposé |

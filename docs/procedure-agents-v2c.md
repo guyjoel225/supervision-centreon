@@ -71,6 +71,13 @@ centreon_central_address: <adresse du central>
 # adresse source est donc la seule protection réelle, et non un supplément.
 snmp_agent_allowed_managers:
   - "{{ centreon_central_address }}"
+
+# Ces deux lignes existent déjà dans l'inventaire, réglées sur la v3 : ce
+# sont leurs valeurs qu'il faut inverser. La version est fixée là, et pas
+# seulement forcée par make snmp-v2c, sinon une vérification lancée seule
+# interroge en v3 et conclut à tort que les agents ne répondent pas.
+snmp_agent_enable_v3: false
+snmp_agent_enable_v2c: true
 ```
 
 La communauté va dans le coffre, jamais dans un fichier en clair ni dans un
@@ -202,9 +209,18 @@ C'est l'étape où l'on se trompe le plus souvent.
 make verify-agents LIMIT=srv-app-01
 ```
 
-Cette vérification prouve que l'agent répond **au contrôleur Ansible**. Elle ne
-prouve rien sur le central : si le contrôleur est autorisé et que le central ne
-l'est pas, elle réussit et la collecte échouera quand même.
+En v2c, cette vérification interroge l'agent **depuis la machine elle-même**,
+par sa boucle locale. Elle n'ouvre rien, ne referme rien et ne touche à aucun
+service : c'est ce qui la rend acceptable sur un serveur en production. Elle
+établit deux choses, l'agent répond et sa vue est assez large pour les plugins
+Linux de Centreon.
+
+Elle n'établit rien sur le chemin réseau entre le central et cette machine. Si
+elle échoue alors que l'agent tourne, deux causes avant toute autre : la
+configuration a été posée par une version du rôle antérieure à l'autorisation
+de la boucle locale, et il suffit de rejouer `make snmp-v2c` sur cet hôte ; ou
+`snmp_agent_listen_loopback` a été passé à `false`, et l'agent n'écoute alors
+pas `127.0.0.1`.
 
 **La seule preuve qui vaille** est la commande de l'étape 1, relancée depuis le
 central, qui doit désormais répondre :

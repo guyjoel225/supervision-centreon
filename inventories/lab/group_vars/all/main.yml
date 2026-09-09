@@ -26,6 +26,14 @@ common_ntp_servers:
 centreon_central_address: "{{ hostvars['srv-central-01'].ansible_host }}"
 
 # --- Rôle snmp_agent ------------------------------------------------
+# Version du protocole servie par les agents. Elle est écrite ici plutôt que
+# laissée à la valeur par défaut du rôle : les playbooks de vérification s'y
+# réfèrent pour savoir dans quelle version interroger, et une version
+# implicite les ferait conclure à un agent muet là où seule la sonde se
+# trompait de protocole.
+snmp_agent_enable_v3: true
+snmp_agent_enable_v2c: false
+
 snmp_agent_v3_user: centreon_ro
 snmp_agent_v3_auth_protocol: SHA
 snmp_agent_v3_priv_protocol: AES

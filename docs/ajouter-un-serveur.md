@@ -328,16 +328,21 @@ réseau de ces serveurs peut alors lire l'intégralité de leur vue SNMP.
 ### Vérifier, sans accès au central
 
 La vérification de référence interroge les agents depuis le serveur central,
-ce que vous ne pouvez pas faire ici. Le playbook de repli fait jouer ce rôle
-au contrôleur Ansible :
+ce que vous ne pouvez pas faire ici. Le playbook de repli s'en passe :
 
 ```bash
 make verify-agents LIMIT=mon-serveur
 ```
 
-Attention à ce qu'il prouve exactement : que l'agent répond **au contrôleur**.
-Si le contrôleur est autorisé et que le central ne l'est pas, la vérification
-réussit et la collecte échouera quand même. Demandez à l'équipe du central de
+En v3, il fait jouer ce rôle au contrôleur Ansible. En v2c, la communauté
+n'étant acceptée que depuis les adresses inscrites dans la configuration de
+l'agent, il interroge celui-ci depuis la machine elle-même par sa boucle
+locale, sans rien ouvrir ni redémarrer.
+
+Attention à ce qu'il prouve exactement : que l'agent répond, et que sa vue est
+assez large. Pas que le central l'atteint. Si le contrôleur est autorisé et que
+le central ne l'est pas, la vérification réussit et la collecte échouera quand
+même. Demandez à l'équipe du central de
 confirmer de son côté, ou faites-vous ouvrir un accès pour tester depuis leur
 machine. C'est la seule preuve qui vaille.
 
