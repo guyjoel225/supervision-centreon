@@ -1,0 +1,39 @@
+## snmpd.conf généré par Ansible - NE PAS MODIFIER MANUELLEMENT
+## Hôte : {{ inventory_hostname }}
+## Date de déploiement : {{ ansible_date_time.iso8601 }}
+
+# ------------------------------------------------------------------
+# Écoute
+# ------------------------------------------------------------------
+agentAddress udp:161
+
+# ------------------------------------------------------------------
+# Communauté en lecture seule, restreinte au réseau de supervision
+# ------------------------------------------------------------------
+rocommunity {{ snmp_ro_community }} {{ snmp_supervision_network }}
+
+# ------------------------------------------------------------------
+# Informations système
+# ------------------------------------------------------------------
+sysLocation    "{{ snmp_syslocation }}"
+sysContact     "{{ snmp_syscontact }}"
+sysName        "{{ ansible_hostname }}"
+
+# ------------------------------------------------------------------
+# Vue restreinte : n'exposer que system + processus/perf de base
+# ------------------------------------------------------------------
+view systemview included .1.3.6.1.2.1.1
+view systemview included .1.3.6.1.2.1.25.1
+
+# ------------------------------------------------------------------
+# Traps SNMP vers le serveur de supervision
+# ------------------------------------------------------------------
+{% if snmp_traps_enabled %}
+trap2sink {{ snmp_supervision_host }} {{ snmp_ro_community }}
+{% endif %}
+
+# ------------------------------------------------------------------
+# Durcissement
+# ------------------------------------------------------------------
+# Pas de rwcommunity : lecture seule uniquement
+# Le process tourne sans privilèges après le bind sur le port 161

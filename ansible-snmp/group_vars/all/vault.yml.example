@@ -1,0 +1,6 @@
+# Copier ce fichier en vault.yml puis chiffrer avec :
+#   ansible-vault encrypt group_vars/all/vault.yml
+#
+# Ne JAMAIS committer vault.yml en clair dans un dépôt Git.
+
+vault_snmp_ro_community: "ChangeMe_C0mplex_Str1ng"

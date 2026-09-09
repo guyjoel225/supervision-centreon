@@ -1,0 +1,104 @@
+---
+# Playbook : installation et configuration de l'agent SNMP v2c
+# Usage : ansible-playbook -i inventory.ini playbook-snmp.yml --ask-vault-pass
+
+- name: Déploiement et configuration de l'agent SNMP v2c
+  hosts: snmp_servers
+  become: true
+  vars:
+    snmp_ro_community: "{{ vault_snmp_ro_community }}"   # défini dans group_vars/all/vault.yml
+    snmp_supervision_network: "10.10.5.0/24"
+    snmp_supervision_host: "10.10.5.10"
+    snmp_syslocation: "Datacenter - Salle X"
+    snmp_syscontact: "admin@domaine.com"
+    snmp_traps_enabled: true
+
+  pre_tasks:
+    - name: Mettre à jour le cache des paquets (Debian/Ubuntu)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+  tasks:
+    - name: Installer net-snmp (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name:
+          - snmpd
+          - snmp-mibs-downloader
+        state: present
+      when: ansible_os_family == "Debian"
+      notify: restart snmpd
+
+    - name: Installer net-snmp (RedHat/Rocky/CentOS)
+      ansible.builtin.yum:
+        name:
+          - net-snmp
+          - net-snmp-utils
+        state: present
+      when: ansible_os_family == "RedHat"
+      notify: restart snmpd
+
+    - name: Sauvegarder la configuration snmpd d'origine (une seule fois)
+      ansible.builtin.copy:
+        src: /etc/snmp/snmpd.conf
+        dest: /etc/snmp/snmpd.conf.orig
+        remote_src: true
+        force: false
+      failed_when: false
+
+    - name: Déployer le fichier de configuration snmpd.conf
+      ansible.builtin.template:
+        src: templates/snmpd.conf.j2
+        dest: /etc/snmp/snmpd.conf
+        owner: root
+        group: root
+        mode: "0600"
+        validate: /usr/sbin/snmpd -Cf %s -c %s
+      notify: restart snmpd
+
+    - name: Ouvrir le port UDP 161 (UFW) - Debian/Ubuntu
+      community.general.ufw:
+        rule: allow
+        port: "161"
+        proto: udp
+        src: "{{ snmp_supervision_host }}"
+      when:
+        - ansible_os_family == "Debian"
+        - snmp_firewall_manage | default(true)
+
+    - name: Ouvrir le port UDP 161 (firewalld) - RedHat/Rocky
+      ansible.posix.firewalld:
+        rich_rule: >-
+          rule family="ipv4" source address="{{ snmp_supervision_host }}"
+          port port="161" protocol="udp" accept
+        permanent: true
+        immediate: true
+        state: enabled
+      when:
+        - ansible_os_family == "RedHat"
+        - snmp_firewall_manage | default(true)
+
+    - name: Activer et démarrer le service snmpd
+      ansible.builtin.systemd:
+        name: snmpd
+        enabled: true
+        state: started
+
+  post_tasks:
+    - name: Vérifier que l'agent répond en local (snmpwalk)
+      ansible.builtin.command:
+        cmd: "snmpwalk -v2c -c {{ snmp_ro_community }} localhost .1.3.6.1.2.1.1.1.0"
+      register: snmp_check
+      changed_when: false
+      failed_when: snmp_check.rc != 0
+
+    - name: Afficher le résultat du test SNMP
+      ansible.builtin.debug:
+        var: snmp_check.stdout
+
+  handlers:
+    - name: restart snmpd
+      ansible.builtin.systemd:
+        name: snmpd
+        state: restarted
