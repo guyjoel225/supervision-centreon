@@ -20,7 +20,7 @@
 #
 # Usage :
 #   ansible-playbook playbooks/snmp-v3.yml -K --ask-vault-pass
-#   ansible-playbook playbooks/snmp-v3.yml --limit op-serv-ub01 -K --ask-vault-pass
+#   ansible-playbook playbooks/snmp-v3.yml --limit srv-ubuntu-01 -K --ask-vault-pass
 # ===================================================================
 
 - name: Configurer les agents en SNMP v3
